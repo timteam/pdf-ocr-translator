@@ -43,13 +43,89 @@ docker-compose -f docker/docker-compose.yml up -d
 ## Architecture
 
 ```
-Frontend (Flutter: Linux/macOS/Windows/Android/iOS)
-              ↓ REST API
-Backend (Python FastAPI with:
-  - OCR (Tesseract)
-  - Translation (Hugging Face)
-  - PDF Processing (pypdf))
+┌─────────────────────────────────────────────────────────────┐
+│                    Frontend (Flutter)                        │
+│  Linux | macOS | Windows | Android | iOS                   │
+│  📦 Native Apps (APK/IPA) for App Stores                   │
+└─────────────────┬───────────────────────────────────────────┘
+                  │ REST API
+┌─────────────────▼───────────────────────────────────────────┐
+│              Backend (Python FastAPI)                        │
+│  🐳 Docker Container (servers/cloud)                        │
+├─────────────────────────────────────────────────────────────┤
+│  • OCR (Tesseract)                                           │
+│  • Translation (Hugging Face)                               │
+│  • PDF Processing (pypdf + PIL)                            │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+## Deployment Strategy
+
+### Mobile Apps (Flutter)
+**No Docker** - Native app store deployment:
+```bash
+# Build native APK/IPA
+./build-mobile.sh
+
+# Results in ./builds/ directory:
+# - pdf-ocr-translator.apk (Android)
+# - pdf-ocr-translator-arm64.apk (Android ARM64)
+# - iOS IPA (when built on macOS)
+```
+
+**App Store Deployment:**
+- **Android**: Sign APK → Google Play Console
+- **iOS**: Sign IPA → App Store Connect
+
+### Docker (Backend Only)
+**Docker deployment** for servers/cloud:
+```bash
+# Production container
+docker build -f docker/Dockerfile.backend -t pdf-ocr-backend .
+docker run -p 8000:8000 pdf-ocr-backend
+```
+
+## Mobile App Deployment
+
+Les apps Flutter sont déployées **nativement** sur les app stores :
+
+### Build Apps Mobiles
+```bash
+# Build APK/IPA natifs
+./build-mobile.sh
+
+# Résultats dans ./builds/:
+# - pdf-ocr-translator.apk (Android)
+# - pdf-ocr-translator-arm64.apk (Android ARM64)
+```
+
+### Déploiement App Stores
+
+#### Android (Google Play)
+```bash
+# 1. Signer l'APK
+jarsigner -verbose -sigalg SHA1withRSA -digestalg SHA1 \
+  -keystore my-release-key.jks \
+  builds/pdf-ocr-translator.apk alias_name
+
+# 2. Aligner l'APK
+zipalign -v 4 builds/pdf-ocr-translator.apk builds/pdf-ocr-translator-aligned.apk
+
+# 3. Upload vers Google Play Console
+# https://play.google.com/console/
+```
+
+#### iOS (App Store)
+```bash
+# Sur macOS avec Xcode:
+flutter build ios --release
+
+# Via Xcode ou fastlane pour signing
+# Upload vers App Store Connect
+# https://appstoreconnect.apple.com/
+```
+
+**⚠️ Note:** Docker n'est **jamais** utilisé pour les apps mobiles - seulement pour le backend serveur.
 
 ## Key Technologies
 

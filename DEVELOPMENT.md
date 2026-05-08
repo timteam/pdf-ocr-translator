@@ -66,16 +66,18 @@ docker run -p 8000:8000 pdf-ocr-backend
 ## CI/CD Pipelines
 
 4 pipelines GitHub Actions sont configurées:
-- Linux: `ci-linux.yml`
-- macOS: `ci-macos.yml`
-- Windows: `ci-windows.yml`
-- Android/iOS: `ci-mobile.yml`
+- Linux: `ci-linux.yml` - Backend Python + Docker
+- macOS: `ci-macos.yml` - Desktop macOS
+- Windows: `ci-windows.yml` - Desktop Windows
+- Android/iOS: `ci-mobile.yml` - Apps mobiles natives
 
 Chaque pipeline:
 1. Teste le code
-2. Build les artefacts
-3. Crée une image Docker (si applicable)
-4. Publie les releases sur les app stores
+2. Build les artefacts natifs (APK/IPA pour mobile, Docker pour backend)
+3. **Docker uniquement pour le backend** - les apps mobiles sont packagées nativement
+4. Publie les releases sur les app stores ou registries
+
+**⚠️ Important:** Les apps mobiles Flutter sont déployées comme des **packages natifs** (APK/IPA) sur les app stores, pas comme des conteneurs Docker.
 
 ## Commits et Commits Messages
 
