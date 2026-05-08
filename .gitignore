@@ -1,3 +1,22 @@
+# Flutter
+flutter_app/.flutter/
+flutter_app/.pub-cache/
+flutter_app/build/
+flutter_app/.dart_tool/
+flutter_app/.packages
+flutter_app/pubspec.lock
+
+# Snap
+*.snap
+snap-builds/
+parts/
+prime/
+stage/
+.snapcraft/
+
+# Mobile builds
+builds/
+
 # Python
 __pycache__/
 *.py[cod]
