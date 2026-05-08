@@ -1,0 +1,61 @@
+name: CI - Windows
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  backend-tests:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          choco install tesseract -y
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+
+      - name: Test with pytest
+        run: |
+          pytest backend/tests -v --cov=backend --cov-report=xml
+
+  flutter-tests:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.16.0'
+          channel: 'stable'
+
+      - name: Get Flutter dependencies
+        run: |
+          cd flutter_app
+          flutter pub get
+
+      - name: Analyze Flutter code
+        run: |
+          cd flutter_app
+          flutter analyze
+
+      - name: Build for Windows
+        run: |
+          cd flutter_app
+          flutter build windows --release

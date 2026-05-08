@@ -1,0 +1,72 @@
+name: pdf_ocr_translator
+description: "Open source solution for PDF OCR and translation across all platforms."
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.1.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI & State Management
+  provider: ^6.0.0
+  go_router: ^12.0.0
+  flutter_riverpod: ^2.4.0
+
+  # HTTP & API
+  http: ^1.1.0
+  dio: ^5.3.0
+
+  # File handling
+  file_picker: ^6.0.0
+  path: ^1.8.3
+  path_provider: ^2.1.0
+
+  # UI Components
+  material_design_icons_flutter: ^7.0.0
+  flutter_svg: ^2.0.0
+  shimmer: ^3.0.0
+
+  # Notifications & Dialogs
+  fluttertoast: ^8.2.0
+  awesome_dialog: ^3.1.0
+
+  # Logging
+  logger: ^2.0.0
+  get_it: ^7.6.0
+
+  # Utils
+  intl: ^0.19.0
+  freezed_annotation: ^2.4.1
+
+  # PDF Viewer
+  pdfx: ^2.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^2.0.0
+  build_runner: ^2.4.0
+  freezed: ^2.4.1
+  json_serializable: ^6.7.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/icons/
+    - assets/fonts/
+
+  fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Roboto-Italic.ttf
+          style: italic

@@ -1,0 +1,25 @@
+# Android Flutter build - Using Google's Flutter image
+FROM ghcr.io/cirruslabs/flutter:latest as flutter-builder
+
+WORKDIR /app
+
+COPY flutter_app/ .
+
+# Get dependencies and build APK
+RUN flutter pub get && \
+    flutter build apk --release
+
+# Final stage - minimal runtime
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=flutter-builder /app/build/app/outputs/flutter-app-release.apk .
+
+EXPOSE 8000
+
+CMD ["echo", "Android APK built successfully. Use: adb install flutter-app-release.apk"]
