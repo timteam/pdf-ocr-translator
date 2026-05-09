@@ -29,7 +29,7 @@ dependencies:
 
   # OCR (Offline)
   google_ml_kit: ^0.16.0
-  tesseract_ocr: ^1.0.2
+  tesseract_ocr: ^0.5.0
 
   # Translation (Offline-capable)
   translator: ^1.0.0

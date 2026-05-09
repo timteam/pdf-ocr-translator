@@ -6,19 +6,9 @@ description: |
   using OCR technology and translates it to multiple languages. All processing happens
   locally on your device - no internet connection required after initial setup.
 
-  Features:
-  - Extract text from PDF images using Google ML Kit OCR
-  - Translate to over 100 languages with local caching
-  - Process PDFs completely offline
-  - Cross-platform support (Linux, Windows, macOS, Android, iOS)
-  - Privacy-first: no data sent to external servers
-
 grade: stable
 confinement: strict
 base: core22
-
-architectures:
-  - build-on: amd64
 
 apps:
   pdf-ocr-translator:
@@ -32,15 +22,11 @@ apps:
       - removable-media
 
 parts:
-  pdf-ocr-translator:
-    plugin: flutter
-    source: flutter_app
-    flutter-target: linux
-    build-packages:
-      - curl
-      - git
-    stage-packages:
-      - libgtk-3-0
-      - libxss1
-      - libgconf-2-4
-      - libxrandr2
+  flutter-app:
+    plugin: dump
+    source: ./flutter_app/build/linux/x64/release/bundle
+    source-type: local
+    organize:
+      '*': ./
+    stage:
+      - '*'

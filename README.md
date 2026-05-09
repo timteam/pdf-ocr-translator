@@ -1,263 +1,318 @@
 # PDF OCR Translator
 
-🌍 **Fully offline PDF OCR and translation app - No backend required!**
+🌍 **Application de traduction PDF OCR entièrement locale — sans backend ni service distant**
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![Flutter](https://img.shields.io/badge/Flutter-3.16+-blue.svg)
 ![Offline](https://img.shields.io/badge/Offline-First-green.svg)
 
-## ✨ Features
+---
 
-- 📄 **PDF Processing**: Extract text from PDF images without modifying originals
-- 🌐 **100+ Languages**: Translate to over 100 languages with local caching
-- 🎯 **Offline OCR**: On-device text extraction using Google ML Kit + Tesseract
-- 📊 **Progress Tracking**: Real-time processing status
-- 🚀 **Cross-Platform**: Native apps for Linux, macOS, Windows, Android, and iOS
-- 🔒 **Privacy First**: All processing happens locally on device
-- 💾 **Smart Caching**: Translation cache for faster repeated translations
-- 📝 **No Internet Required**: Works completely offline after first setup
+## 📘 Présentation
 
-## 🏗️ Architecture
+`PDF OCR Translator` est une application Flutter conçue pour extraire du texte depuis des PDFs image, le traduire et générer une copie PDF traduite avec du texte superposé localement.
+
+- 100 % client-side
+- Aucun backend
+- Pas de service cloud
+- Traitement sur l’appareil
+- Compatible Linux / Windows / macOS / Android / iOS
+
+---
+
+## ✨ Fonctionnalités principales
+
+- 📄 Extraction OCR depuis des pages PDF image
+- 🌐 Traduction dans plusieurs langues
+- 🖨️ Génération d’un PDF de sortie avec textes en surimpression
+- 📈 Indicateur de progression par page
+- 🔒 Confidentialité garantie : tout reste local
+- 💾 Cache de traduction pour accélérer les traductions répétées
+- ✅ Mode offline après première utilisation
+
+---
+
+## 🏗️ Architecture globale
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Flutter App (Client-Side)                │
-│  Linux | macOS | Windows | Android | iOS                   │
-├─────────────────────────────────────────────────────────────┤
-│  • OCR (Google ML Kit + Tesseract)                          │
-│  • Translation (Google Translate API + Cache)              │
-│  • PDF Processing (pdfx + pdf packages)                    │
-│  • Local Storage (SharedPreferences + File System)         │
-└─────────────────────────────────────────────────────────────┘
+PDF Input
+   └──> Flutter App (Client)
+          ├── OCR
+          │     ├─ Google ML Kit
+          │     └─ Tesseract fallback
+          ├── Traduction
+          │     ├─ Google Translate API localisée
+          │     └─ cache JSON local
+          ├── Traitement PDF
+          │     ├─ pdfx (lecture)
+          │     └─ pdf (écriture)
+          └── Stockage local
+                ├─ shared_preferences
+                └─ system files
 ```
 
-**Everything runs locally on the device - No backend, no cloud, no servers!**
+---
 
-## 🚀 Quick Start
+## 🧩 Structure du projet
 
-### Prerequisites
-- Flutter 3.16+
-- For Android: Android SDK
-- For iOS: macOS + Xcode
+```
+pdf-ocr-translator/
+├── flutter_app/
+│   ├── lib/
+│   │   ├── main.dart
+│   │   ├── screens/
+│   │   ├── services/
+│   │   ├── models/
+│   │   └── theme/
+│   ├── android/
+│   ├── ios/
+│   ├── pubspec.yaml
+│   └── test/
+├── build-snap.sh
+├── snapcraft.yaml
+├── SNAP-README.md
+└── README.md
+```
 
-### Setup & Run
+---
+
+## 🔧 Dépendances clés
+
+### Flutter / Dart
+- `flutter` SDK 3.16+
+- `provider` pour l’état
+- `go_router` pour la navigation
+- `flutter_riverpod` pour l’injection de dépendances
+
+### OCR
+- `google_ml_kit: ^0.16.0`
+- `tesseract_ocr: ^0.5.0`
+
+### Traduction
+- `translator: ^1.0.0`
+- `flutter_translate: ^4.1.0`
+
+### PDF
+- `pdfx: ^2.4.0`
+- `pdf: ^3.10.0`
+- `printing: ^5.12.0`
+
+### Stockage & fichiers
+- `shared_preferences: ^2.2.0`
+- `path_provider: ^2.1.0`
+- `file_picker: ^6.0.0`
+
+### Permissions & UI
+- `permission_handler: ^11.0.0`
+- `material_design_icons_flutter: ^7.0.0`
+- `flutter_svg: ^2.0.0`
+- `shimmer: ^3.0.0`
+- `fluttertoast: ^8.2.0`
+- `awesome_dialog: ^3.1.0`
+
+### Utilitaires
+- `image: ^4.1.0`
+- `logger: ^2.0.0`
+- `intl: ^0.19.0`
+- `uuid: ^4.0.0`
+
+> Note : la version de `tesseract_ocr` a été ajustée à `^0.5.0` pour garantir la résolution de dépendances Flutter.
+
+---
+
+## 🛠️ Environnements supportés
+
+### Environnement de développement
+
+- **Linux** : recommandé pour la génération du snap
+- **macOS** : utile pour iOS et macOS
+- **Windows** : utile pour Windows
+
+### Environnement de build
+
+- `Flutter SDK` installé et accessible dans le `PATH`
+- `flutter pub get` doit réussir dans `flutter_app`
+- **Linux** requis pour la génération du snap `snapcraft`
+- `snapcraft` installé via `sudo snap install snapcraft --classic`
+- Desktop Linux support should be enabled with `flutter config --enable-linux-desktop`
+
+> Important : la génération du snap est conçue pour être faite sur un hôte Linux. Le script `build-snap.sh` vérifie cela.
+
+### Linux build prerequisites
+
+For Linux desktop and snap builds, install these packages on Debian/Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install build-essential cmake ninja-build clang++ pkg-config libgtk-3-dev libglib2.0-dev liblzma-dev
+```
+
+If `flutter pub get` warns about `file_picker` desktop plugin references, the issue is related to the package plugin metadata and may not block build if the desktop platform implementation is available. If the build fails, consider using the stable `file_picker` version that matches your Flutter SDK or switching to a desktop-friendly file picker package.
+
+---
+
+## 🚀 Procédure de build détaillée
+
+### 1. Installer les prérequis
+
+#### Linux
+
+```bash
+sudo snap install snapcraft --classic
+```
+
+Installer Flutter selon la documentation officielle :
+
+```bash
+# Exemple d’installation simple
+git clone https://github.com/flutter/flutter.git -b stable ~/flutter
+export PATH="$HOME/flutter/bin:$PATH"
+flutter doctor
+```
+
+#### macOS
+
+- Installer Flutter
+- Installer Xcode
+- Installer CocoaPods si nécessaire
+
+#### Windows
+
+- Installer Flutter
+- Installer Visual Studio avec les charges de travail Desktop
+- Installer Android Studio pour Android
+
+---
+
+### 2. Installer les dépendances Flutter
+
 ```bash
 cd flutter_app
-
-# Install dependencies
 flutter pub get
-
-# Run on connected device/emulator
-flutter run
-
-# Build for specific platform
-flutter build apk      # Android APK
-flutter build ios      # iOS (macOS only)
-flutter build windows  # Windows
-flutter build linux    # Linux
-flutter build macos    # macOS
 ```
 
-### Mobile App Deployment
+### 3. Tester localement
 
-**Android:**
+```bash
+flutter run
+```
+
+### 4. Build mobile
+
 ```bash
 flutter build apk --release
-# Sign and deploy to Play Store
+flutter build ios --release   # sur macOS seulement
 ```
 
-**iOS:**
+### 5. Build desktop
+
 ```bash
-flutter build ios --release
-# Deploy via Xcode to App Store
+flutter build linux --release
+flutter build windows --release
+flutter build macos --release
 ```
 
-### Linux Snap Package
+### 6. Build Snap Linux
 
-**Build Snap:**
 ```bash
+cd /home/tim/Repos/pdf-ocr-translator
 ./build-snap.sh
 ```
 
-**Install Snap:**
+Si le projet n’a pas encore de dossier `linux/`, le script génère automatiquement le support desktop Linux.
+
+---
+
+## 📦 Packaging Snap
+
+### Fichiers importants
+
+- `snapcraft.yaml` : configuration snap
+- `build-snap.sh` : script de build snap automatisé
+- `SNAP-README.md` : instructions de packaging snap
+
+### Installation locale du snap
+
 ```bash
 sudo snap install ./snap-builds/pdf-ocr-translator_*.snap --dangerous
 ```
 
-**Run:**
+### Exécution
+
 ```bash
 pdf-ocr-translator
 ```
 
-See [SNAP-README.md](SNAP-README.md) for detailed snap building instructions.
+---
 
-## 📱 How It Works
+## 💡 Fonctionnement interne
 
-1. **Select PDF**: Pick any PDF file from your device
-2. **Choose Languages**: Select source and target languages
-3. **Offline Processing**:
-   - PDF pages → Images
-   - OCR extraction (Google ML Kit)
-   - Translation (cached API calls)
-   - Overlay translated text
-   - Generate new PDF
-4. **Save Result**: Translated PDF saved locally
+1. Le PDF sélectionné est converti en images page par page.
+2. Chaque image est envoyée à l’OCR pour extraire le texte.
+3. Les blocs de texte sont traduits dans la langue cible.
+4. Un PDF de sortie est généré avec des zones de texte surimprimées.
+5. Le PDF original n’est pas modifié : seule une copie traduite est créée.
 
-## 🔧 Technical Details
+---
 
-### OCR Engine
-- **Primary**: Google ML Kit (fast, accurate, offline)
-- **Fallback**: Tesseract OCR (works on all platforms)
+## 🔍 Détails techniques
 
-### Translation
-- **API**: Google Translate with intelligent caching
-- **Cache**: Local JSON storage for repeated translations
-- **Offline**: Cached translations work without internet
+### OCR
 
-### PDF Processing
-- **Reading**: pdfx package for PDF parsing
-- **Writing**: pdf package for PDF generation
-- **Overlay**: Text positioned over original images
+- **Google ML Kit** pour l’extraction principale
+- **Tesseract** en fallback si nécessaire
 
-### Storage
-- **Cache**: SharedPreferences + local JSON files
-- **Files**: Device document directory
-- **Permissions**: Automatic permission requests
+### Traduction
 
-## 📦 Dependencies
+- Utilise la couche `translator`
+- Contrôle local du cache pour accélérer les requêtes
+- Possibilité de fonctionner offline après premières requêtes
 
-```yaml
-# OCR
-google_ml_kit: ^0.16.0      # Google ML Kit OCR
-tesseract_ocr: ^1.0.2       # Tesseract fallback
+### PDF
 
-# Translation
-translator: ^1.0.0          # Google Translate API
+- Lecture avec `pdfx`
+- Génération et mise en page avec `pdf`
+- Texte traduit ajouté en surimpression sur la page
 
-# PDF
-pdfx: ^2.4.0               # PDF reading
-pdf: ^3.10.0               # PDF generation
+---
 
-# Storage & Utils
-shared_preferences: ^2.2.0  # Local cache
-path_provider: ^2.1.0      # File paths
-permission_handler: ^11.0.0 # Permissions
-```
+## 🧪 Tests et validation
 
-## 🌐 Supported Languages
-
-16 core languages with Google Translate coverage:
-- English, French, Spanish, German, Italian, Portuguese
-- Dutch, Polish, Russian, Japanese, Chinese, Korean
-- Arabic, Hindi, Thai, Vietnamese
-
-## 💾 Offline Capabilities
-
-- **OCR**: Works completely offline (ML models downloaded)
-- **Translation**: Cached translations work offline
-- **Processing**: All PDF operations local
-- **Storage**: Files saved to device only
-
-## 🔄 Data Flow
-
-```
-PDF File → Pages → Images → OCR → Text Blocks → Translation → Overlay → New PDF
-     ↓         ↓        ↓       ↓         ↓            ↓         ↓        ↓
-  Local    Local    Local   Local    Local        Cache     Local    Local
-```
-
-## 🛠️ Development
-
-### Project Structure
-```
-flutter_app/
-├── lib/
-│   ├── main.dart              # App initialization
-│   ├── screens/               # UI screens
-│   ├── services/              # Business logic
-│   │   ├── ocr_service.dart       # OCR processing
-│   │   ├── translation_service.dart # Translation + cache
-│   │   └── pdf_service.dart       # PDF processing
-│   ├── models/                # Data models
-│   └── theme/                 # UI theme
-├── android/                   # Android config
-├── ios/                       # iOS config
-└── pubspec.yaml              # Dependencies
-```
-
-### Testing
 ```bash
+cd flutter_app
 flutter test
-flutter test --coverage
 ```
 
-### Building
-```bash
-# Debug
-flutter run
+### Tests complémentaires
 
-# Release builds
-flutter build apk --release --split-per-abi
-flutter build ios --release
-flutter build windows --release
-flutter build linux --release
-flutter build macos --release
-```
+- Vérifier l’ouverture du PDF dans l’app
+- Vérifier l’extraction OCR
+- Vérifier la traduction de texte
+- Vérifier la génération du fichier PDF de sortie
 
-## 📋 Permissions Required
+---
 
-### Android (AndroidManifest.xml)
-```xml
-<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-<uses-permission android:name="android.permission.INTERNET" />
-```
+## ⚠️ Problèmes connus
 
-### iOS (Info.plist)
-```xml
-<key>NSPhotoLibraryUsageDescription</key>
-<string>Access to photo library for PDF files</string>
-<key>NSFileProviderDomainUsageDescription</key>
-<string>Access to files for PDF processing</string>
-```
+- `flutter build linux` nécessite le support desktop Linux configuré
+- `snapcraft` doit être installé sur Linux
+- Certains packages Flutter peuvent devoir être ajustés si les versions changent
 
-## 🔍 Troubleshooting
+---
 
-### OCR Not Working
-```bash
-# Check device storage permissions
-# Restart app to download ML models
-# Try different PDF quality
-```
+## 📋 Notes de release
 
-### Translation Issues
-```bash
-# Check internet connection for first-time translations
-# Clear cache if corrupted: Settings > Clear Cache
-```
+- `feature/pdf-ocr-translator-setup` contient le packaging snap
+- `build-snap.sh` génère le binaire Linux, puis le package snap
+- `README.md` couvre la procédure complète
+- `SNAP-README.md` donne une alternative dédiée au packaging snap
 
-### PDF Processing Errors
-```bash
-# Ensure PDF is not password-protected
-# Try smaller PDFs first
-# Check available storage space
-```
+---
 
-## 📊 Performance
+## 📝 Conclusion
 
-- **OCR**: ~2-5 seconds per page (depends on image quality)
-- **Translation**: ~1-3 seconds per text block (cached: instant)
-- **PDF Generation**: ~1-2 seconds per page
-- **Cache Size**: Configurable, default unlimited
+Cette solution est conçue pour fournir une application PDF OCR + traduction 100 % locale, multi-plateforme et compatible avec les exigences modernes de confidentialité et d’App Store. Le processus de build est également documenté pour permettre la génération native et la distribution Linux via snap.
 
-## 🔐 Privacy & Security
-
-- **No Data Sent**: Everything processed locally
-- **No Accounts**: No user registration required
-- **Local Storage**: Files stay on device
-- **Cache Optional**: Can disable translation caching
-
-## 🎯 Use Cases
 
 - **Travel**: Translate documents abroad
 - **Education**: Language learning materials
