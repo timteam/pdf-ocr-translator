@@ -1,0 +1,75 @@
+name: pdf-ocr-translator
+version: 0.1.0
+title: PDF OCR Translator
+summary: Fully offline PDF OCR and translation app
+description: |
+  PDF OCR Translator extracts text from image-based PDF files using
+  Tesseract OCR and translates it to multiple languages. All OCR
+  processing happens locally on your device — no backend, no cloud.
+
+license: Apache-2.0
+contact: timothee.troncy@gmail.com
+
+grade: stable
+confinement: strict
+base: core22
+
+apps:
+  pdf-ocr-translator:
+    command: pdf_ocr_translator
+    environment:
+      TESSDATA_PREFIX: $SNAP/usr/share/tesseract-ocr/4.00/tessdata
+    plugs:
+      - home
+      - network
+      - opengl
+      - wayland
+      - x11
+      - removable-media
+
+parts:
+  flutter-app:
+    plugin: dump
+    source: ./flutter_app/build/linux/x64/release/bundle
+    source-type: local
+    organize:
+      '*': ./
+    stage:
+      - '*'
+
+  # Dépendances GTK3 requises par libflutter_linux_gtk.so et les plugins
+  gtk-runtime:
+    plugin: nil
+    stage-packages:
+      - libatk1.0-0
+      - libcairo2
+      - libepoxy0
+      - libgdk-pixbuf2.0-0
+      - libgtk-3-0
+
+  tesseract:
+    plugin: nil
+    stage-packages:
+      - poppler-utils
+      - tesseract-ocr
+      - tesseract-ocr-eng
+      - tesseract-ocr-fra
+      - tesseract-ocr-deu
+      - tesseract-ocr-spa
+      - tesseract-ocr-ita
+      - tesseract-ocr-por
+      - tesseract-ocr-nld
+      - tesseract-ocr-pol
+      - tesseract-ocr-rus
+      - tesseract-ocr-jpn
+      - tesseract-ocr-chi-sim
+      - tesseract-ocr-kor
+      - tesseract-ocr-ara
+      - tesseract-ocr-hin
+      - tesseract-ocr-tha
+      - tesseract-ocr-vie
+    # Exclure les bibliothèques inutilisées signalées par le linter
+    prime:
+      - -usr/lib/x86_64-linux-gnu/libicuio.so*
+      - -usr/lib/x86_64-linux-gnu/libicutest.so*
+      - -usr/lib/x86_64-linux-gnu/libssl3.so*

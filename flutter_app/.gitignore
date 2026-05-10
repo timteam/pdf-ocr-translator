@@ -1,0 +1,51 @@
+# Indicates that this directory is a Dart package.
+pubspec.yaml:
+  version: 0.1.0
+
+# Platform-specific native code
+.android/
+.ios/
+.web/
+.windows/
+.macos/
+.linux/
+ios/Flutter/Flutter.framework/
+ios/Flutter/Flutter.podspec
+
+# Certificates
+ios/Runner/GeneratedPluginRegistrant.swift
+android/app/google-services.json
+
+# Gradle
+android/local.properties
+android/.gradle/
+android/app/local.properties
+android/app/debug/
+android/app/profile/
+android/app/release/
+
+# iOS
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/flutter_export_environment.sh
+ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings
+ios/Runner/GeneratedPluginRegistrant.*
+
+# Build
+build/
+.dart_tool/
+.packages
+pubspec.lock
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# OS
+.DS_Store
+Thumbs.db

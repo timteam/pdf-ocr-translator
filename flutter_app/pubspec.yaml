@@ -1,0 +1,77 @@
+name: pdf_ocr_translator
+description: "Open source PDF OCR and translation - Fully offline client-side app"
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.1.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI & State Management
+  provider: ^6.0.0
+  go_router: ^12.0.0
+  flutter_riverpod: ^2.4.0
+
+  # File handling & Storage
+  file_picker: ^6.0.0
+  path: ^1.8.3
+  path_provider: ^2.1.0
+  shared_preferences: ^2.2.0
+
+  # PDF Processing
+  # pdfx supprimé : pas de support Linux desktop (MissingPluginException)
+  # Rendu des pages via pdftoppm (poppler-utils) — voir pdf_service.dart
+  pdf: ^3.10.0
+  printing: ^5.12.0
+
+  # Translation (Offline-capable)
+  translator: ^1.0.0
+  flutter_translate: ^4.1.0
+
+  # Image Processing
+  image: ^4.1.0
+
+  # Permissions
+  permission_handler: ^11.0.0
+
+  # UI Components
+  material_design_icons_flutter: ^7.0.0
+  flutter_svg: ^2.0.0
+  shimmer: ^3.0.0
+  fluttertoast: ^8.2.0
+  awesome_dialog: ^3.1.0
+
+  # Logging
+  logger: ^2.0.0
+
+  # Utils
+  intl: ^0.19.0
+  uuid: ^4.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^2.0.0
+  build_runner: ^2.4.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+    - assets/icons/
+    - assets/fonts/
+
+  fonts:
+    - family: Roboto
+      fonts:
+        - asset: assets/fonts/Roboto-Regular.ttf
+        - asset: assets/fonts/Roboto-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/Roboto-Italic.ttf
+          style: italic
