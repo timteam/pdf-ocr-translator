@@ -10,23 +10,17 @@ Application de traduction PDF OCR entièrement locale — sans backend ni servic
 
 ## Présentation
 
-`PDF OCR Translator` est une application Flutter conçue pour extraire du texte depuis des PDFs image, le traduire et générer une copie PDF traduite avec du texte superposé, traitée localement.
-
-- Architecture 100 % client-side
-- Aucun backend
-- Pas de service cloud propre
-- Traitement sur l'appareil
+`PDF OCR Translator` est une application Flutter Linux desktop qui extrait du texte depuis des PDFs image via OCR, le traduit, et génère un PDF de sortie avec le texte traduit superposé sur chaque page. Tout le traitement se fait localement sur l'appareil, sans backend ni cloud propriétaire.
 
 ---
 
 ## Fonctionnalités (cahier des charges)
 
-Ces fonctionnalités constituent les exigences du projet. Certaines sont déjà implémentées, d'autres sont en cours ou à venir.
-
 - Extraction OCR depuis des pages PDF image
 - Traduction dans plusieurs langues
 - Génération d'un PDF de sortie avec textes en surimpression
-- Indicateur de progression par page
+- Choix du chemin et nom du fichier de sortie avant le lancement
+- Indicateur de progression détaillé par page et par étape
 - Confidentialité : aucune donnée envoyée vers un backend propriétaire
 - Cache de traduction pour accélérer les traductions répétées
 - Mode offline après première utilisation (grâce au cache)
@@ -37,41 +31,53 @@ Ces fonctionnalités constituent les exigences du projet. Certaines sont déjà 
 
 | Fonctionnalité | Statut | Notes |
 |---|---|---|
-| Sélection de PDF | Implémenté | Via `file_picker` |
-| OCR (extraction de texte) | Implémenté | Tesseract CLI via `Process.run` + parsing TSV |
-| Traduction | Implémenté | Via Google Translate API (réseau requis) + cache local JSON |
-| Cache de traduction | Implémenté | Fichier `translation_cache.json` dans les documents de l'app |
-| Génération PDF traduit | Implémenté | Image originale + overlay de texte traduit |
-| Indicateur de progression | Implémenté | Pourcentage et étape en cours |
-| Écran de résultat | Implémenté | Affichage du chemin du PDF de sortie |
-| Build Linux desktop | Fonctionnel | Build release produit dans `flutter_app/build/linux/x64/release/bundle` |
-| Packaging Snap | Configuré | Tesseract + 16 tessdata bundlés via `stage-packages` |
-| Build Android / iOS | Non testé | Fichiers Flutter présents, build non validé |
-| Mode offline complet | Partiel | Cache couvre les traductions déjà effectuées ; OCR 100 % local |
+| Sélection du PDF source | Implémenté | Via `file_picker` |
+| Choix du fichier de sortie | Implémenté | Dialog pré-rempli avec `source_lang.pdf` dans le même dossier, bouton "Parcourir…" |
+| Rendu des pages en images | Implémenté | `pdftoppm` (poppler-utils) à 150 DPI |
+| OCR | Implémenté | Tesseract CLI, sortie TSV, groupement par paragraphe |
+| Traduction | Implémenté | Google Translate API (réseau requis) + cache JSON local |
+| Cache de traduction | Implémenté | `translation_cache.json` dans les documents de l'app |
+| Génération PDF par page | Implémenté | `compute()` Flutter — exécuté dans un isolate de fond (UI non bloquée) |
+| Assemblage du document final | Implémenté | `pdfunite` (poppler-utils) |
+| Progression détaillée | Implémenté | Cercle global + barre d'étape avec % + barre indéterminée pour l'assemblage |
+| Build Linux desktop | Fonctionnel | `flutter_app/build/linux/x64/release/bundle/` |
+| Packaging Snap | Fonctionnel | Tesseract, tessdata (16 langues) et poppler-utils bundlés |
+| Build Android / iOS | Non validé | Structure Flutter présente, build non testé |
+| Mode offline complet | Partiel | OCR 100 % local ; traduction nécessite le réseau sauf si cachée |
 
 ---
 
 ## Architecture globale
 
 ```
-PDF Input (sélectionné par l'utilisateur)
-   └──> Flutter App (client-side)
-          ├── OCR
-          │     └─ Tesseract CLI (Process.run → TSV → blocs texte + positions)
-          ├── Traduction
-          │     ├─ Google Translate API (via package `translator`, requiert réseau)
-          │     └─ Cache JSON local (fichier dans documents de l'app)
-          ├── Traitement PDF
-          │     ├─ pdfx (lecture + rendu des pages en images PNG)
-          │     └─ pdf (écriture du PDF de sortie avec overlays)
-          └── Stockage local
-                ├─ shared_preferences
-                └─ getApplicationDocumentsDirectory()
+PDF source (sélectionné par l'utilisateur)
+   │
+   ├─ pdfinfo          → nombre de pages
+   │
+   └─ Pour chaque page :
+        ├─ pdftoppm    → image PNG (150 DPI)
+        ├─ tesseract   → TSV → blocs texte + bounding boxes
+        ├─ translator  → Google Translate API + cache JSON local
+        └─ compute()   → PDF de la page (isolate de fond)
+                              │
+                              └─ fichier PDF temporaire
+   │
+   └─ pdfunite         → assemblage en fichier de destination
 ```
 
-> Note sur la traduction : le package `translator` est un wrapper non officiel de Google Translate. Il effectue des appels réseau. Le cache local compense partiellement cette contrainte pour les traductions déjà effectuées.
+**Outils système requis :**
+- `poppler-utils` — fournit `pdfinfo`, `pdftoppm`, `pdfunite`
+- `tesseract-ocr` + fichiers `tessdata` par langue
 
-> Note sur l'OCR : Tesseract est appelé via son CLI (`Process.run`). Le binaire et les fichiers de langues (`tessdata`) doivent être disponibles sur le système en développement, ou sont bundlés dans le snap en production.
+**Packages Flutter actifs :**
+- `pdf` — génération des pages PDF avec overlay
+- `image` — décodage PNG pour calcul des dimensions en points
+- `translator` — wrapper Google Translate
+- `provider` + `go_router` — state management et navigation
+- `file_picker` — sélection du PDF source et du fichier de sortie
+- `path_provider`, `path`, `logger`, `shared_preferences`
+
+> La traduction utilise le package `translator`, wrapper non officiel de Google Translate. Elle nécessite le réseau. Le cache local JSON prend le relais pour les textes déjà traduits.
 
 ---
 
@@ -81,32 +87,26 @@ PDF Input (sélectionné par l'utilisateur)
 pdf-ocr-translator/
 ├── flutter_app/
 │   ├── lib/
-│   │   ├── main.dart
+│   │   ├── main.dart                    # Bootstrap, Provider, GoRouter
 │   │   ├── screens/
-│   │   │   ├── home_screen.dart
-│   │   │   ├── processing_screen.dart
-│   │   │   └── result_screen.dart
+│   │   │   ├── home_screen.dart         # Sélection PDF + langues + dialog sortie
+│   │   │   ├── processing_screen.dart   # Progression globale + étape courante
+│   │   │   └── result_screen.dart       # Affichage du fichier produit
 │   │   ├── services/
-│   │   │   ├── ocr_service.dart
-│   │   │   ├── pdf_service.dart
-│   │   │   └── translation_service.dart
+│   │   │   ├── pdf_service.dart         # Pipeline complet (pdfinfo/pdftoppm/pdfunite/compute)
+│   │   │   ├── ocr_service.dart         # Tesseract CLI → TSV → OCRTextBlock[]
+│   │   │   └── translation_service.dart # GoogleTranslator + cache JSON
 │   │   ├── models/
-│   │   │   ├── language.dart
-│   │   │   └── processing.dart
+│   │   │   ├── language.dart            # 16 langues supportées
+│   │   │   └── processing.dart          # ProcessingUpdate (progression)
 │   │   └── theme/
 │   │       └── app_theme.dart
-│   ├── assets/
-│   │   ├── fonts/
-│   │   ├── images/
-│   │   └── icons/
+│   ├── assets/fonts/
 │   ├── linux/
-│   ├── android/
-│   ├── ios/
 │   ├── pubspec.yaml
 │   └── test/
-├── build-snap.sh
-├── build-mobile.sh
-├── snapcraft.yaml
+├── snapcraft.yaml                       # Snap (core22, confinement strict)
+├── build-snap.sh                        # Script de build snap
 ├── SNAP-README.md
 ├── DEVELOPMENT.md
 ├── CONTRIBUTING.md
@@ -115,85 +115,43 @@ pdf-ocr-translator/
 
 ---
 
-## Dépendances clés
+## Flux utilisateur
 
-### Flutter / Dart
-- `flutter` SDK 3.16+
-- `provider: ^6.0.0` — gestion d'état (utilisé dans `main.dart` et les écrans)
-- `go_router: ^12.0.0` — navigation entre écrans
-- `flutter_riverpod: ^2.4.0` — déclaré en dépendance, non utilisé dans le code actuel
-
-### OCR
-- Tesseract CLI — appelé via `dart:io` `Process.run`, pas de package Flutter
-- Tessdata : fichiers de langues à installer séparément (voir prérequis)
-
-### Traduction
-- `translator: ^1.0.0` — wrapper Google Translate (appels réseau)
-- `flutter_translate: ^4.1.0` — déclaré, non utilisé activement
-
-### PDF
-- `pdfx: ^2.4.0` — lecture PDF, rendu de pages en images
-- `pdf: ^3.10.0` — génération du PDF de sortie
-- `printing: ^5.12.0` — aperçu et impression
-
-### Stockage & fichiers
-- `shared_preferences: ^2.2.0`
-- `path_provider: ^2.1.0`
-- `file_picker: ^6.0.0`
-- `path: ^1.8.3`
-
-### Image
-- `image: ^4.1.0`
-
-### Permissions & UI
-- `permission_handler: ^11.0.0`
-- `material_design_icons_flutter: ^7.0.0`
-- `flutter_svg: ^2.0.0`
-- `shimmer: ^3.0.0`
-- `fluttertoast: ^8.2.0`
-- `awesome_dialog: ^3.1.0`
-
-### Utilitaires
-- `logger: ^2.0.0`
-- `intl: ^0.19.0`
-- `uuid: ^4.0.0`
+1. **HomeScreen** — sélection du PDF source, choix des langues source et cible
+2. **Dialog "Fichier de sortie"** — chemin pré-rempli (`même_dossier/nom_lang.pdf`), modifiable, bouton "Parcourir…"
+3. **ProcessingScreen** — pour chaque page :
+   - Rendu PNG (`pdftoppm`)
+   - Extraction OCR (`tesseract`, TSV)
+   - Traduction bloc par bloc (avec cache)
+   - Écriture du PDF de page dans un isolate (`compute`)
+   - Indicateur global (cercle %) + indicateur d'étape (barre linéaire %)
+4. **Assemblage** — `pdfunite` fusionne tous les PDFs de pages → fichier de destination (barre indéterminée)
+5. **ResultScreen** — chemin du fichier produit
 
 ---
 
 ## Langues supportées
 
-16 langues définies dans `language.dart` :
+16 langues définies dans `language.dart`, mappées vers les codes Tesseract dans `ocr_service.dart` :
 
-| Code | Langue |
-|------|--------|
-| `en` | English |
-| `fr` | Français |
-| `es` | Español |
-| `de` | Deutsch |
-| `it` | Italiano |
-| `pt` | Português |
-| `nl` | Nederlands |
-| `pl` | Polski |
-| `ru` | Русский |
-| `ja` | 日本語 |
-| `zh` | 中文 |
-| `ko` | 한국어 |
-| `ar` | العربية |
-| `hi` | हिन्दी |
-| `th` | ไทย |
-| `vi` | Tiếng Việt |
-
----
-
-## Fonctionnement interne
-
-1. L'utilisateur sélectionne un PDF via `file_picker`.
-2. Le PDF est chargé page par page avec `pdfx` (rendu en image PNG via PDFium).
-3. Chaque image de page est envoyée à Google ML Kit pour extraire les blocs de texte et leurs positions (`boundingBox`).
-4. Chaque bloc est traduit via `translator` (Google Translate API) — le cache local est consulté en priorité.
-5. Un PDF de sortie est généré avec `pdf` : chaque page affiche l'image originale + des overlays de texte traduit positionnés sur les bounding boxes OCR.
-6. Le PDF de sortie est sauvegardé dans `getApplicationDocumentsDirectory()`.
-7. Le PDF original n'est pas modifié.
+| App | Tesseract | Langue |
+|-----|-----------|--------|
+| `en` | `eng` | English |
+| `fr` | `fra` | Français |
+| `es` | `spa` | Español |
+| `de` | `deu` | Deutsch |
+| `it` | `ita` | Italiano |
+| `pt` | `por` | Português |
+| `nl` | `nld` | Nederlands |
+| `pl` | `pol` | Polski |
+| `ru` | `rus` | Русский |
+| `ja` | `jpn` | 日本語 |
+| `zh` | `chi_sim` | 中文 |
+| `ko` | `kor` | 한국어 |
+| `ar` | `ara` | العربية |
+| `hi` | `hin` | हिन्दी |
+| `th` | `tha` | ไทย |
+| `vi` | `vie` | Tiếng Việt |
 
 ---
 
@@ -203,35 +161,24 @@ pdf-ocr-translator/
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake ninja-build clang++ pkg-config libgtk-3-dev libglib2.0-dev liblzma-dev
+sudo apt install \
+  build-essential cmake ninja-build clang++ pkg-config \
+  libgtk-3-dev libglib2.0-dev liblzma-dev \
+  poppler-utils
 ```
 
-Tesseract et les données de langues utilisées par l'app :
+Tesseract et les tessdata :
 
 ```bash
 sudo apt install \
   tesseract-ocr \
-  tesseract-ocr-eng \
-  tesseract-ocr-fra \
-  tesseract-ocr-deu \
-  tesseract-ocr-spa \
-  tesseract-ocr-ita \
-  tesseract-ocr-por \
-  tesseract-ocr-nld \
-  tesseract-ocr-pol \
-  tesseract-ocr-rus \
-  tesseract-ocr-jpn \
-  tesseract-ocr-chi-sim \
-  tesseract-ocr-kor \
-  tesseract-ocr-ara \
-  tesseract-ocr-hin \
-  tesseract-ocr-tha \
-  tesseract-ocr-vie
+  tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-deu tesseract-ocr-spa \
+  tesseract-ocr-ita tesseract-ocr-por tesseract-ocr-nld tesseract-ocr-pol \
+  tesseract-ocr-rus tesseract-ocr-jpn tesseract-ocr-chi-sim tesseract-ocr-kor \
+  tesseract-ocr-ara tesseract-ocr-hin tesseract-ocr-tha tesseract-ocr-vie
 ```
 
-> En production (snap), Tesseract et les tessdata sont bundlés automatiquement via `stage-packages` dans `snapcraft.yaml`.
-
-Flutter doit être installé et accessible dans le `PATH` :
+Flutter SDK :
 
 ```bash
 git clone https://github.com/flutter/flutter.git -b stable ~/flutter
@@ -240,7 +187,9 @@ flutter doctor
 flutter config --enable-linux-desktop
 ```
 
-### Snap (Linux uniquement)
+> En production (snap), `poppler-utils`, `tesseract-ocr` et les 16 tessdata sont bundlés via `stage-packages` dans `snapcraft.yaml`. L'utilisateur final n'a rien à installer.
+
+### Snap
 
 ```bash
 sudo snap install snapcraft --classic
@@ -250,14 +199,14 @@ sudo snap install snapcraft --classic
 
 ## Procédure de build
 
-### 1. Installer les dépendances Flutter
+### 1. Dépendances Flutter
 
 ```bash
 cd flutter_app
 flutter pub get
 ```
 
-### 2. Tester en mode développement
+### 2. Mode développement
 
 ```bash
 flutter run -d linux
@@ -269,79 +218,89 @@ flutter run -d linux
 flutter build linux --release
 ```
 
-Le binaire est produit dans :
+Binaire produit dans :
 ```
 flutter_app/build/linux/x64/release/bundle/pdf_ocr_translator
 ```
 
-### 4. Build Snap Linux
+### 4. Build Snap
 
 ```bash
-cd /home/tim/Repos/pdf-ocr-translator
-./build-snap.sh
+cd /chemin/vers/pdf-ocr-translator
+bash build-snap.sh
 ```
 
-Le script suppose que le build Linux release a été effectué au préalable.
+Le script compile le bundle Flutter, puis lance `snapcraft` qui télécharge et bundle `poppler-utils`, `tesseract-ocr` et les tessdata.
 
-### 5. Build mobile (non validé)
-
-```bash
-flutter build apk --release          # Android
-flutter build ios --release          # macOS uniquement
-```
-
----
-
-## Packaging Snap
-
-### Fichiers
-
-- `snapcraft.yaml` — configuration snap (confinement strict, base core22)
-- `build-snap.sh` — script de build snap automatisé
-- `SNAP-README.md` — instructions dédiées au packaging snap
-
-### Installation locale du snap
+### 5. Installation locale du snap
 
 ```bash
 sudo snap install ./snap-builds/pdf-ocr-translator_*.snap --dangerous
+pdf-ocr-translator
 ```
 
-### Exécution
+### 6. Build mobile (non validé)
 
 ```bash
-pdf-ocr-translator
+flutter build apk --release
+flutter build ios --release   # macOS uniquement
 ```
 
 ---
 
-## Tests
+## Dépendances clés
 
-```bash
-cd flutter_app
-flutter test
-```
+### Packages Flutter actifs
 
-Tests manuels à effectuer :
-- Ouverture et sélection d'un PDF
-- Extraction OCR (vérifier que le texte est bien détecté)
-- Traduction de texte (vérifier que les appels réseau fonctionnent)
-- Génération du PDF de sortie
-- Comportement en mode offline (cache)
+| Package | Usage |
+|---|---|
+| `provider: ^6.0.0` | Gestion d'état |
+| `go_router: ^12.0.0` | Navigation |
+| `file_picker: ^6.0.0` | Sélection fichiers (source + destination) |
+| `pdf: ^3.10.0` | Génération PDF par page avec overlay |
+| `image: ^4.1.0` | Décodage PNG pour calcul dimensions |
+| `translator: ^1.0.0` | Wrapper Google Translate (réseau) |
+| `shared_preferences: ^2.2.0` | Persistance légère |
+| `path_provider: ^2.1.0` | Chemins système |
+| `path: ^1.8.3` | Manipulation de chemins |
+| `logger: ^2.0.0` | Logging |
+| `permission_handler: ^11.0.0` | Permissions fichiers |
+| `printing: ^5.12.0` | Déclaré, non utilisé activement |
+
+### Packages déclarés, non utilisés dans le code actuel
+
+| Package | Raison |
+|---|---|
+| `flutter_riverpod: ^2.4.0` | Remplacé par `provider` |
+| `flutter_translate: ^4.1.0` | Non intégré |
+| `pdfx: ^2.4.0` | Rendu remplacé par `pdftoppm` |
+| `shimmer`, `fluttertoast`, `awesome_dialog`, etc. | UI non finalisée |
+
+### Outils système
+
+| Outil | Paquet apt | Usage |
+|---|---|---|
+| `pdfinfo` | `poppler-utils` | Comptage des pages |
+| `pdftoppm` | `poppler-utils` | Rendu page → PNG |
+| `pdfunite` | `poppler-utils` | Assemblage PDF final |
+| `tesseract` | `tesseract-ocr` | Extraction OCR |
+| tessdata | `tesseract-ocr-[lang]` | Modèles par langue |
 
 ---
 
 ## Problèmes connus
 
-- La traduction nécessite une connexion Internet (Google Translate API). Le mode offline total n'est pas encore atteint.
-- `flutter_riverpod` est dans `pubspec.yaml` mais non utilisé dans le code actuel.
-- Tesseract doit être installé sur le système hôte pour le développement (`tesseract` doit être dans le `PATH`).
+- La traduction nécessite une connexion Internet (Google Translate API). Le mode offline complet n'est pas encore atteint.
+- `flutter_riverpod`, `pdfx`, `flutter_translate` et quelques packages UI sont déclarés dans `pubspec.yaml` mais non utilisés.
+- La génération PDF par page utilise `compute()` (isolate Flutter) pour rester non bloquante — l'approche est validée sur 110 pages.
+- `pdfunite` doit être installé sur le système hôte en développement (inclus dans `poppler-utils`).
 
 ---
 
 ## Branches
 
 - `main` — branche principale
-- `feature/pdf-ocr-translator-setup` — branche courante, contient le packaging snap et la structure de l'app
+- `feature/pdf-ocr-translator-setup` — branche courante
 
 ---
 
