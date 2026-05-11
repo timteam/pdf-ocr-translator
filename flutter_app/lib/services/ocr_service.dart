@@ -9,10 +9,27 @@ import 'package:logger/logger.dart';
 class OCRService {
   final logger = Logger();
 
+  // Cached path to project-local tessdata_best directory (next to the binary).
+  // Empty string means "not found / use system tessdata".
+  static String? _localTessdata;
+
+  static Future<Map<String, String>?> _tessdataEnv() async {
+    // If the snap (or the user) already set TESSDATA_PREFIX, don't override.
+    if (Platform.environment.containsKey('TESSDATA_PREFIX')) return null;
+    if (_localTessdata == null) {
+      final exeDir = p.dirname(Platform.resolvedExecutable);
+      final candidate = p.join(exeDir, 'tessdata');
+      _localTessdata = await Directory(candidate).exists() ? candidate : '';
+    }
+    return _localTessdata!.isNotEmpty
+        ? {'TESSDATA_PREFIX': _localTessdata!}
+        : null;
+  }
+
   static const Map<String, String> _langMap = {
     'en': 'eng', 'fr': 'fra', 'es': 'spa', 'de': 'deu',
     'it': 'ita', 'pt': 'por', 'nl': 'nld', 'pl': 'pol',
-    'ru': 'rus', 'ja': 'jpn', 'zh': 'chi_sim', 'ko': 'kor',
+    'ru': 'rus', 'ja': 'jpn+jpn_vert', 'zh': 'chi_sim', 'ko': 'kor',
     'ar': 'ara', 'hi': 'hin', 'th': 'tha', 'vi': 'vie',
   };
 
@@ -82,6 +99,12 @@ class OCRService {
 
     var processed = img.grayscale(src);
     processed = img.normalize(processed, min: 0, max: 255);
+    processed = img.copyResize(
+      processed,
+      width: processed.width * 2,
+      height: processed.height * 2,
+      interpolation: img.Interpolation.cubic,
+    );
 
     final outPath = p.join(tempDir.path, 'prep_${DateTime.now().millisecondsSinceEpoch}.png');
     await File(outPath).writeAsBytes(img.encodePng(processed));
@@ -95,7 +118,7 @@ class OCRService {
     final outputBase = p.join(tempDir.path, 'det_${DateTime.now().millisecondsSinceEpoch}');
     final result = await Process.run('tesseract', [
       imageFile.path, outputBase, '-l', tessLang, 'tsv',
-    ]);
+    ], environment: await _tessdataEnv());
 
     final tsvFile = File('$outputBase.tsv');
     if (result.exitCode != 0 || !await tsvFile.exists()) return [];
@@ -151,7 +174,7 @@ class OCRService {
     final outputBase = p.join(tempDir.path, 'ocr_${DateTime.now().millisecondsSinceEpoch}');
     final result = await Process.run('tesseract', [
       imageFile.path, outputBase, '-l', tessLang, '--psm', psm, 'tsv',
-    ]);
+    ], environment: await _tessdataEnv());
 
     if (result.exitCode != 0) {
       logger.e('Tesseract error (psm $psm): ${result.stderr}');

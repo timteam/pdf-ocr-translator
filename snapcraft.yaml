@@ -52,24 +52,24 @@ parts:
     stage-packages:
       - poppler-utils
       - tesseract-ocr
-      - tesseract-ocr-eng
-      - tesseract-ocr-fra
-      - tesseract-ocr-deu
-      - tesseract-ocr-spa
-      - tesseract-ocr-ita
-      - tesseract-ocr-por
-      - tesseract-ocr-nld
-      - tesseract-ocr-pol
-      - tesseract-ocr-rus
-      - tesseract-ocr-jpn
-      - tesseract-ocr-chi-sim
-      - tesseract-ocr-kor
-      - tesseract-ocr-ara
-      - tesseract-ocr-hin
-      - tesseract-ocr-tha
-      - tesseract-ocr-vie
-    # Exclure les bibliothèques inutilisées signalées par le linter
+    # Exclure les tessdata installés par les dépendances apt (tesseract-ocr-eng,
+    # etc.) — remplacés par les modèles best du part tessdata-best ci-dessous.
+    stage:
+      - -usr/share/tesseract-ocr/4.00/tessdata/
     prime:
       - -usr/lib/x86_64-linux-gnu/libicuio.so*
       - -usr/lib/x86_64-linux-gnu/libicutest.so*
       - -usr/lib/x86_64-linux-gnu/libssl3.so*
+
+  # Modèles tessdata_best — téléchargés localement via scripts/setup_tessdata_best.sh
+  # avant de builder le snap. Les fichiers .traineddata remplacent les modèles
+  # standard des packages apt (meilleure précision, même chemin TESSDATA_PREFIX).
+  tessdata-best:
+    plugin: nil
+    source: tessdata
+    source-type: local
+    override-build: |
+      set -e
+      DEST=$SNAPCRAFT_PART_INSTALL/usr/share/tesseract-ocr/4.00/tessdata
+      mkdir -p $DEST
+      cp $SNAPCRAFT_PART_SRC/*.traineddata $DEST/

@@ -13,7 +13,7 @@ import 'ocr_service.dart';
 import 'translation_service.dart';
 import '../models/processing.dart';
 
-const int _renderDpi = 150;
+const int _renderDpi = 300;
 
 const double _phaseRender = 0.10;
 const double _phaseOCR = 0.35;

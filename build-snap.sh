@@ -28,6 +28,24 @@ echo -e "${BLUE}✅ Snapcraft found: $(snapcraft --version)${NC}"
 BUILD_DIR="./snap-builds"
 mkdir -p "$BUILD_DIR"
 
+echo -e "${YELLOW}🔍 Checking tessdata_best models...${NC}"
+TESSDATA_DIR="./tessdata"
+REQUIRED_LANGS=(eng fra spa deu ita por nld pol rus jpn jpn_vert chi_sim kor ara hin tha vie)
+MISSING=0
+for lang in "${REQUIRED_LANGS[@]}"; do
+  if [[ ! -f "$TESSDATA_DIR/${lang}.traineddata" ]]; then
+    MISSING=1
+    break
+  fi
+done
+
+if [[ $MISSING -eq 1 ]]; then
+  echo -e "${YELLOW}⬇️  Tessdata best models not found. Downloading...${NC}"
+  ./scripts/setup_tessdata_best.sh
+else
+  echo -e "${GREEN}✅ Tessdata best models already downloaded.${NC}"
+fi
+
 echo -e "${YELLOW}🔨 Building Flutter Linux bundle...${NC}"
 echo "This may take several minutes..."
 
