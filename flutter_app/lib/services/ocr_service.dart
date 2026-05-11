@@ -13,17 +13,25 @@ class OCRService {
   // Empty string means "not found / use system tessdata".
   static String? _localTessdata;
 
-  static Future<Map<String, String>?> _tessdataEnv() async {
-    // If the snap (or the user) already set TESSDATA_PREFIX, don't override.
-    if (Platform.environment.containsKey('TESSDATA_PREFIX')) return null;
+  Future<Map<String, String>?> _tessdataEnv() async {
+    // Snap : TESSDATA_PREFIX déjà défini dans l'environnement → modèles bundlés.
+    if (Platform.environment.containsKey('TESSDATA_PREFIX')) {
+      logger.i('TESSDATA_PREFIX (snap): ${Platform.environment['TESSDATA_PREFIX']}');
+      return null;
+    }
     if (_localTessdata == null) {
       final exeDir = p.dirname(Platform.resolvedExecutable);
       final candidate = p.join(exeDir, 'tessdata');
       _localTessdata = await Directory(candidate).exists() ? candidate : '';
     }
-    return _localTessdata!.isNotEmpty
-        ? {'TESSDATA_PREFIX': _localTessdata!}
-        : null;
+    if (_localTessdata!.isEmpty) {
+      throw Exception(
+        'Modèles Tesseract introuvables.\n'
+        'Lancez ./scripts/setup_tessdata_best.sh puis rebuilder l\'application.',
+      );
+    }
+    logger.i('TESSDATA_PREFIX (bundle): $_localTessdata');
+    return {'TESSDATA_PREFIX': _localTessdata!};
   }
 
   static const Map<String, String> _langMap = {
@@ -50,11 +58,13 @@ class OCRService {
 
       // Étape 2 : passe 1 — détection des régions (niveau 2 = blocs)
       final blockRects = await _detectBlockRects(preprocessed, tessLang, tempDir);
-      logger.i('Régions détectées: ${blockRects.length}');
+      logger.i('Passe 1 — régions détectées: ${blockRects.length}');
 
       if (blockRects.isEmpty) {
-        // Fallback : OCR pleine page avec layout automatique
-        return await _runOCR(preprocessed, tessLang, tempDir, psm: '3');
+        logger.w('Aucune région détectée — fallback OCR pleine page (psm 3)');
+        final fallbackBlocks = await _runOCR(preprocessed, tessLang, tempDir, psm: '3');
+        logger.i('Fallback pleine page: ${fallbackBlocks.length} bloc(s)');
+        return fallbackBlocks;
       }
 
       // Pré-décode l'image une seule fois pour tous les recadrages
@@ -62,7 +72,8 @@ class OCRService {
 
       // Étape 3 : passe 2 — OCR par région indépendante (--psm 6)
       final result = <OCRTextBlock>[];
-      for (final rect in blockRects) {
+      for (int ri = 0; ri < blockRects.length; ri++) {
+        final rect = blockRects[ri];
         if (srcDecoded == null) break;
         final crop = _cropRegion(srcDecoded, rect);
         if (crop == null) continue;
@@ -80,9 +91,11 @@ class OCRService {
           offsetX: crop.originX,
           offsetY: crop.originY,
         );
+        logger.d('  région[$ri] ${rect.width.toInt()}×${rect.height.toInt()} → ${blocks.length} bloc(s)');
         result.addAll(blocks);
       }
 
+      logger.i('Passe 2 — total blocs avant filtrage garbage: ${result.length}');
       return result;
     } finally {
       for (final path in ownTempFiles) {
@@ -110,9 +123,20 @@ class OCRService {
     File imageFile, String tessLang, Directory tempDir,
   ) async {
     final outputBase = p.join(tempDir.path, 'det_${DateTime.now().millisecondsSinceEpoch}');
-    final result = await Process.run('tesseract', [
+    final env = await _tessdataEnv();
+    var result = await Process.run('tesseract', [
       imageFile.path, outputBase, '-l', tessLang, 'tsv',
-    ], environment: await _tessdataEnv());
+    ], environment: env);
+
+    // Si la combinaison de langues échoue (ex: jpn+jpn_vert sans jpn_vert installé),
+    // relancer avec la langue de base seule.
+    if (result.exitCode != 0 && tessLang.contains('+')) {
+      final baseLang = tessLang.split('+').first;
+      logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
+      result = await Process.run('tesseract', [
+        imageFile.path, outputBase, '-l', baseLang, 'tsv',
+      ], environment: env);
+    }
 
     final tsvFile = File('$outputBase.tsv');
     if (result.exitCode != 0 || !await tsvFile.exists()) return [];
@@ -166,9 +190,19 @@ class OCRService {
     double offsetY = 0,
   }) async {
     final outputBase = p.join(tempDir.path, 'ocr_${DateTime.now().millisecondsSinceEpoch}');
-    final result = await Process.run('tesseract', [
+    final env = await _tessdataEnv();
+    var result = await Process.run('tesseract', [
       imageFile.path, outputBase, '-l', tessLang, '--psm', psm, 'tsv',
-    ], environment: await _tessdataEnv());
+    ], environment: env);
+
+    // Fallback vers la langue de base si la combinaison échoue (ex: jpn_vert absent).
+    if (result.exitCode != 0 && tessLang.contains('+')) {
+      final baseLang = tessLang.split('+').first;
+      logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
+      result = await Process.run('tesseract', [
+        imageFile.path, outputBase, '-l', baseLang, '--psm', psm, 'tsv',
+      ], environment: env);
+    }
 
     if (result.exitCode != 0) {
       logger.e('Tesseract error (psm $psm): ${result.stderr}');
@@ -186,9 +220,14 @@ class OCRService {
 
   List<OCRTextBlock> _parseTSV(String tsv, {double offsetX = 0, double offsetY = 0}) {
     final lines = tsv.split('\n');
-    if (lines.length < 2) return [];
+    if (lines.length < 2) {
+      logger.w('TSV vide ou invalide (${lines.length} ligne(s))');
+      return [];
+    }
 
     final Map<String, _ParagraphGroup> groups = {};
+    int wordsTotal = 0;
+    int wordsLowConf = 0;
 
     for (final line in lines.skip(1)) {
       final parts = line.split('\t');
@@ -197,6 +236,7 @@ class OCRService {
       final level = int.tryParse(parts[0]) ?? 0;
       if (level != 5) continue; // niveau 5 = mots
 
+      wordsTotal++;
       final pageNum  = parts[1];
       final blockNum = parts[2];
       final parNum   = parts[3];
@@ -207,18 +247,23 @@ class OCRService {
       final conf   = double.tryParse(parts[10]) ?? -1;
       final text   = parts[11].trim();
 
-      if (conf < 50 || text.isEmpty) continue;
+      if (conf < 50 || text.isEmpty) { wordsLowConf++; continue; }
 
       final key = '$pageNum-$blockNum-$parNum';
       groups.putIfAbsent(key, () => _ParagraphGroup());
       groups[key]!.addWord(text, conf, left, top, left + width, top + height);
     }
 
-    return groups.values
-        .where((g) => g.words.isNotEmpty)
-        .where((g) => g.avgConf >= 40)
-        .where((g) => g.bbox.width >= 20 && g.bbox.height >= 10)
-        .where((g) => !_isGarbageText(g.text))
+    logger.d('TSV: $wordsTotal mots lus, $wordsLowConf filtrés (conf<50), ${groups.length} groupes formés');
+
+    final all        = groups.values.where((g) => g.words.isNotEmpty).toList();
+    final confOk     = all.where((g) => g.avgConf >= 40).toList();
+    final sizeOk     = confOk.where((g) => g.bbox.width >= 20 && g.bbox.height >= 10).toList();
+    final notGarbage = sizeOk.where((g) => !_isGarbageText(g.text)).toList();
+
+    logger.d('Filtrage: ${all.length} groupes → conf≥40: ${confOk.length} → taille ok: ${sizeOk.length} → non-garbage: ${notGarbage.length}');
+
+    return notGarbage
         .map((g) => OCRTextBlock(text: g.text, boundingBox: g.bbox))
         .toList();
   }

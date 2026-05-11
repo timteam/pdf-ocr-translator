@@ -82,6 +82,7 @@ if [[ ! -d linux ]]; then
   flutter create --platforms=linux .
 fi
 
+flutter clean
 flutter pub get
 flutter build linux --release
 cd ..

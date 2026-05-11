@@ -164,11 +164,13 @@ class PDFProcessingService {
         tempImages.add(imageFile.path);
 
         final imageBytes = await imageFile.readAsBytes();
+        logger.i('Page $pageIndex: image rendue — ${imageBytes.length ~/ 1024} Ko, chemin: ${imageFile.path}');
         final decoded = img.decodeImage(imageBytes);
         if (decoded == null) {
-          logger.e('Décodage image échoué page $pageIndex');
+          logger.e('Page $pageIndex: décodage image échoué');
           continue;
         }
+        logger.i('Page $pageIndex: dimensions image — ${decoded.width}×${decoded.height} px');
         final ptWidth = decoded.width * 72.0 / _renderDpi;
         final ptHeight = decoded.height * 72.0 / _renderDpi;
         final pixelToPoint = 72.0 / _renderDpi;
@@ -182,7 +184,11 @@ class PDFProcessingService {
         final textBlocks = await _ocrService.extractTextBlocks(
           imageFile, language: sourceLanguage,
         );
-        logger.i('Page $pageIndex: ${textBlocks.length} bloc(s) OCR');
+        logger.i('Page $pageIndex: ${textBlocks.length} bloc(s) OCR après filtrage');
+        for (int i = 0; i < textBlocks.length; i++) {
+          final bb = textBlocks[i].boundingBox;
+          logger.d('  bloc[$i] — "${textBlocks[i].text.substring(0, textBlocks[i].text.length.clamp(0, 60))}" | bb: ${bb.left.toInt()},${bb.top.toInt()} ${bb.width.toInt()}×${bb.height.toInt()}');
+        }
 
         // Étape 3 — Traduction par bloc
         final blocks = <Map<String, dynamic>>[];
@@ -196,7 +202,11 @@ class PDFProcessingService {
           final translated = await _translationService.translateText(
             textBlocks[i].text, sourceLanguage, targetLanguage,
           );
-          if (translated.trim().isEmpty) continue;
+          if (translated.trim().isEmpty) {
+            logger.w('  bloc[$i]: traduction vide, ignoré (original: "${textBlocks[i].text.substring(0, textBlocks[i].text.length.clamp(0, 40))}")');
+            continue;
+          }
+          logger.d('  bloc[$i]: "${translated.substring(0, translated.length.clamp(0, 60))}"');
           final bb = textBlocks[i].boundingBox;
           blocks.add({
             'text': translated,
@@ -206,6 +216,7 @@ class PDFProcessingService {
             'height': bb.height * pixelToPoint,
           });
         }
+        logger.i('Page $pageIndex: ${blocks.length} bloc(s) traduits insérés dans le PDF');
 
         // Étape 4 — Génération PDF de la page dans un isolate (non bloquant)
         await _emit(onProgress, ProcessingUpdate(

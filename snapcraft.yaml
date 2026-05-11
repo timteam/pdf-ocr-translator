@@ -12,7 +12,7 @@ contact: timothee.troncy@gmail.com
 
 grade: stable
 confinement: strict
-base: core22
+base: core24
 
 apps:
   pdf-ocr-translator:
@@ -46,6 +46,9 @@ parts:
       - libepoxy0
       - libgdk-pixbuf2.0-0
       - libgtk-3-0
+      - libgl1
+      - libgles2
+      - libegl1
 
   tesseract:
     plugin: nil
