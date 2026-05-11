@@ -99,12 +99,6 @@ class OCRService {
 
     var processed = img.grayscale(src);
     processed = img.normalize(processed, min: 0, max: 255);
-    processed = img.copyResize(
-      processed,
-      width: processed.width * 2,
-      height: processed.height * 2,
-      interpolation: img.Interpolation.cubic,
-    );
 
     final outPath = p.join(tempDir.path, 'prep_${DateTime.now().millisecondsSinceEpoch}.png');
     await File(outPath).writeAsBytes(img.encodePng(processed));
