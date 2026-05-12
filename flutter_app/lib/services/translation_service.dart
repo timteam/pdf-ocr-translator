@@ -2,10 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:translator/translator.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:logger/logger.dart';
+import 'app_logger.dart';
 
 class TranslationService {
-  final logger = Logger();
+  final logger = AppLogger.build();
   final _googleTranslator = GoogleTranslator();
   Map<String, String> _translationCache = {};
   bool _argosAvailable = false;
@@ -65,6 +65,9 @@ class TranslationService {
       return _translationCache[cacheKey]!;
     }
 
+    final src = text.length > 80 ? '${text.substring(0, 80)}…' : text;
+    logger.d('Traduction [$fromLanguage→$toLanguage] src: "$src"');
+
     try {
       final String translated;
       if (_argosAvailable) {
@@ -80,11 +83,14 @@ class TranslationService {
         logger.i('Google Translate: $fromLanguage→$toLanguage');
       }
 
+      final dst = translated.length > 80 ? '${translated.substring(0, 80)}…' : translated;
+      logger.d('  → résultat: "$dst"');
+
       _translationCache[cacheKey] = translated;
       await _saveCacheToStorage();
       return translated;
-    } catch (e) {
-      logger.e('Traduction échouée: $e');
+    } catch (e, st) {
+      logger.e('Traduction échouée [$fromLanguage→$toLanguage]: $e\n$st');
       return text;
     }
   }

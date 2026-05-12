@@ -17,7 +17,7 @@ dependencies:
   flutter_riverpod: ^2.4.0
 
   # File handling & Storage
-  file_picker: ^6.0.0
+  file_picker: ^11.0.0
   path: ^1.8.3
   path_provider: ^2.1.0
   shared_preferences: ^2.2.0

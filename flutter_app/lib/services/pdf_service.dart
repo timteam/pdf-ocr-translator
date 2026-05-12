@@ -8,7 +8,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:image/image.dart' as img;
-import 'package:logger/logger.dart';
+import 'app_logger.dart';
 import 'ocr_service.dart';
 import 'translation_service.dart';
 import '../models/processing.dart';
@@ -83,7 +83,7 @@ Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
 }
 
 class PDFProcessingService {
-  final logger = Logger();
+  final logger = AppLogger.build();
   final OCRService _ocrService = OCRService();
   final TranslationService _translationService = TranslationService();
 
@@ -92,7 +92,12 @@ class PDFProcessingService {
   }
 
   Future<int> _getPageCount(File pdfFile) async {
+    logger.d('pdfinfo "${pdfFile.path}"');
     final result = await Process.run('pdfinfo', [pdfFile.path]);
+    logger.d('pdfinfo exit=${result.exitCode} stdout="${(result.stdout as String).trim()}"');
+    if (result.stderr != null && (result.stderr as String).isNotEmpty) {
+      logger.w('pdfinfo stderr: ${result.stderr}');
+    }
     if (result.exitCode != 0) throw Exception('pdfinfo failed: ${result.stderr}');
     final match = RegExp(r'Pages:\s+(\d+)').firstMatch(result.stdout as String);
     return int.tryParse(match?.group(1) ?? '1') ?? 1;
@@ -103,11 +108,13 @@ class PDFProcessingService {
       tempDir.path,
       'page_${pageNumber}_${DateTime.now().millisecondsSinceEpoch}',
     );
-    final result = await Process.run('pdftoppm', [
-      '-r', '$_renderDpi', '-png',
-      '-f', '$pageNumber', '-l', '$pageNumber',
-      pdfFile.path, prefix,
-    ]);
+    final args = ['-r', '$_renderDpi', '-png', '-f', '$pageNumber', '-l', '$pageNumber', pdfFile.path, prefix];
+    logger.d('pdftoppm ${args.join(' ')}');
+    final result = await Process.run('pdftoppm', args);
+    logger.d('pdftoppm exit=${result.exitCode}');
+    if (result.stderr != null && (result.stderr as String).isNotEmpty) {
+      logger.w('pdftoppm stderr: ${result.stderr}');
+    }
     if (result.exitCode != 0) {
       throw Exception('pdftoppm failed on page $pageNumber: ${result.stderr}');
     }
@@ -119,6 +126,7 @@ class PDFProcessingService {
     if (files.isEmpty) {
       throw Exception('pdftoppm: aucun fichier produit pour la page $pageNumber');
     }
+    logger.d('pdftoppm → ${files.first.path}');
     return files.first;
   }
 
@@ -142,7 +150,14 @@ class PDFProcessingService {
     final List<String> tempImages = [];
 
     try {
-      logger.i('Début traitement PDF: ${pdfFile.path}');
+      AppLogger.setOutputPath(outputPath);
+      logger.i('=== processPDF démarré ===');
+      logger.i('  PDF source   : ${pdfFile.path}');
+      logger.i('  Langue src   : $sourceLanguage');
+      logger.i('  Langue cible : $targetLanguage');
+      logger.i('  Sortie       : $outputPath');
+      logger.i('  Exécutable   : ${Platform.resolvedExecutable}');
+      logger.i('  Dart version : ${Platform.version}');
 
       final pageCount = await _getPageCount(pdfFile);
       logger.i('Nombre de pages: $pageCount');
@@ -252,15 +267,23 @@ class PDFProcessingService {
       ));
 
       await Directory(p.dirname(outputPath)).create(recursive: true);
+      logger.d('pdfunite ${[...tempPagePdfs, outputPath].join(' ')}');
       final mergeResult = await Process.run(
         'pdfunite', [...tempPagePdfs, outputPath],
       );
+      logger.d('pdfunite exit=${mergeResult.exitCode}');
+      if (mergeResult.stderr != null && (mergeResult.stderr as String).isNotEmpty) {
+        logger.w('pdfunite stderr: ${mergeResult.stderr}');
+      }
       if (mergeResult.exitCode != 0) {
         throw Exception('pdfunite failed: ${mergeResult.stderr}');
       }
 
-      logger.i('Traitement terminé: $outputPath');
+      logger.i('=== Traitement terminé: $outputPath ===');
       return outputPath;
+    } catch (e, st) {
+      logger.e('EXCEPTION dans processPDF: $e\n$st');
+      rethrow;
     } finally {
       for (final path in [...tempPagePdfs, ...tempImages]) {
         try { await File(path).delete(); } catch (_) {}

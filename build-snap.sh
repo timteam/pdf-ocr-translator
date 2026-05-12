@@ -89,7 +89,9 @@ cd ..
 
 echo -e "${YELLOW}🔨 Packaging snap from built bundle...${NC}"
 
-echo "This may take several minutes..."
+# Mode managé (LXD/Multipass) : snapcraft crée un container Ubuntu 24.04 et le
+# réutilise entre les builds — les packages apt sont cachés dans ce container.
+echo "This may take several minutes (plus long on first run while container is created)..."
 
 # Build the snap
 if snapcraft pack; then

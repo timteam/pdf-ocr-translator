@@ -4,10 +4,10 @@ import 'dart:ui' show Rect;
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-import 'package:logger/logger.dart';
+import 'app_logger.dart';
 
 class OCRService {
-  final logger = Logger();
+  final logger = AppLogger.build();
 
   // Cached path to project-local tessdata_best directory (next to the binary).
   // Empty string means "not found / use system tessdata".
@@ -124,22 +124,27 @@ class OCRService {
   ) async {
     final outputBase = p.join(tempDir.path, 'det_${DateTime.now().millisecondsSinceEpoch}');
     final env = await _tessdataEnv();
-    var result = await Process.run('tesseract', [
-      imageFile.path, outputBase, '-l', tessLang, 'tsv',
-    ], environment: env);
+    final args1 = [imageFile.path, outputBase, '-l', tessLang, 'tsv'];
+    logger.d('tesseract (passe1) ${args1.join(' ')}');
+    var result = await Process.run('tesseract', args1, environment: env);
+    logger.d('tesseract passe1 exit=${result.exitCode}');
+    if ((result.stderr as String).isNotEmpty) logger.d('tesseract passe1 stderr: ${result.stderr}');
 
-    // Si la combinaison de langues échoue (ex: jpn+jpn_vert sans jpn_vert installé),
-    // relancer avec la langue de base seule.
     if (result.exitCode != 0 && tessLang.contains('+')) {
       final baseLang = tessLang.split('+').first;
       logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
-      result = await Process.run('tesseract', [
-        imageFile.path, outputBase, '-l', baseLang, 'tsv',
-      ], environment: env);
+      final args2 = [imageFile.path, outputBase, '-l', baseLang, 'tsv'];
+      logger.d('tesseract (passe1-fallback) ${args2.join(' ')}');
+      result = await Process.run('tesseract', args2, environment: env);
+      logger.d('tesseract passe1-fallback exit=${result.exitCode}');
+      if ((result.stderr as String).isNotEmpty) logger.d('tesseract passe1-fallback stderr: ${result.stderr}');
     }
 
     final tsvFile = File('$outputBase.tsv');
-    if (result.exitCode != 0 || !await tsvFile.exists()) return [];
+    if (result.exitCode != 0 || !await tsvFile.exists()) {
+      logger.e('tesseract passe1 échoué — pas de TSV généré');
+      return [];
+    }
 
     final tsv = await tsvFile.readAsString();
     await tsvFile.delete();
@@ -191,17 +196,20 @@ class OCRService {
   }) async {
     final outputBase = p.join(tempDir.path, 'ocr_${DateTime.now().millisecondsSinceEpoch}');
     final env = await _tessdataEnv();
-    var result = await Process.run('tesseract', [
-      imageFile.path, outputBase, '-l', tessLang, '--psm', psm, 'tsv',
-    ], environment: env);
+    final args1 = [imageFile.path, outputBase, '-l', tessLang, '--psm', psm, 'tsv'];
+    logger.d('tesseract (passe2 psm=$psm) ${args1.join(' ')}');
+    var result = await Process.run('tesseract', args1, environment: env);
+    logger.d('tesseract passe2 exit=${result.exitCode}');
+    if ((result.stderr as String).isNotEmpty) logger.d('tesseract passe2 stderr: ${result.stderr}');
 
-    // Fallback vers la langue de base si la combinaison échoue (ex: jpn_vert absent).
     if (result.exitCode != 0 && tessLang.contains('+')) {
       final baseLang = tessLang.split('+').first;
       logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
-      result = await Process.run('tesseract', [
-        imageFile.path, outputBase, '-l', baseLang, '--psm', psm, 'tsv',
-      ], environment: env);
+      final args2 = [imageFile.path, outputBase, '-l', baseLang, '--psm', psm, 'tsv'];
+      logger.d('tesseract (passe2-fallback psm=$psm) ${args2.join(' ')}');
+      result = await Process.run('tesseract', args2, environment: env);
+      logger.d('tesseract passe2-fallback exit=${result.exitCode}');
+      if ((result.stderr as String).isNotEmpty) logger.d('tesseract passe2-fallback stderr: ${result.stderr}');
     }
 
     if (result.exitCode != 0) {

@@ -8,7 +8,6 @@ import 'screens/processing_screen.dart';
 import 'screens/result_screen.dart';
 import 'services/translation_service.dart';
 import 'services/pdf_service.dart';
-
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 

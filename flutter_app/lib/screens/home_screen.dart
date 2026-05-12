@@ -34,7 +34,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _pickPDFFile() async {
     try {
-      final result = await FilePicker.platform.pickFiles(
+      final result = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf'],
       );
@@ -110,7 +110,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 8),
             TextButton.icon(
               onPressed: () async {
-                final result = await FilePicker.platform.saveFile(
+                final result = await FilePicker.saveFile(
                   dialogTitle: 'Enregistrer le PDF traduit',
                   fileName: p.basename(defaultPath),
                   type: FileType.custom,

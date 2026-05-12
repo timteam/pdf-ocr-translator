@@ -10,15 +10,20 @@ description: |
 license: Apache-2.0
 contact: timothee.troncy@gmail.com
 
-grade: stable
+grade: devel
 confinement: strict
-base: core24
+base: core26
+build-base: devel
+
+lint:
+  ignore:
+    - library
 
 apps:
   pdf-ocr-translator:
     command: pdf_ocr_translator
     environment:
-      TESSDATA_PREFIX: $SNAP/usr/share/tesseract-ocr/4.00/tessdata
+      TESSDATA_PREFIX: $SNAP/usr/share/tesseract-ocr/5/tessdata
     plugs:
       - home
       - network
@@ -58,7 +63,7 @@ parts:
     # Exclure les tessdata installés par les dépendances apt (tesseract-ocr-eng,
     # etc.) — remplacés par les modèles best du part tessdata-best ci-dessous.
     stage:
-      - -usr/share/tesseract-ocr/4.00/tessdata/
+      - -usr/share/tesseract-ocr/5/tessdata/
     prime:
       - -usr/lib/x86_64-linux-gnu/libicuio.so*
       - -usr/lib/x86_64-linux-gnu/libicutest.so*
@@ -73,6 +78,6 @@ parts:
     source-type: local
     override-build: |
       set -e
-      DEST=$SNAPCRAFT_PART_INSTALL/usr/share/tesseract-ocr/4.00/tessdata
+      DEST=$SNAPCRAFT_PART_INSTALL/usr/share/tesseract-ocr/5/tessdata
       mkdir -p $DEST
       cp $SNAPCRAFT_PART_SRC/*.traineddata $DEST/
