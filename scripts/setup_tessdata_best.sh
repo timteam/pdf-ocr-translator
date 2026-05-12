@@ -32,6 +32,20 @@ for lang in "${LANGS[@]}"; do
   wget -q --show-progress -O "$FILE" "$BASE_URL/${lang}.traineddata"
 done
 
+# Tesseract needs its configs/ and tessconfigs/ subdirectories in TESSDATA_PREFIX
+# to produce TSV output (read_params_file looks for configs/tsv there).
+echo ""
+echo "Copying Tesseract config files..."
+SYSTEM_TESSDATA="/usr/share/tesseract-ocr/5/tessdata"
+for subdir in configs tessconfigs; do
+  if [[ -d "$SYSTEM_TESSDATA/$subdir" ]]; then
+    cp -r "$SYSTEM_TESSDATA/$subdir" "$TESSDATA_DIR/"
+    echo "  Copied $subdir/ from system tesseract"
+  else
+    echo "  [warn] $SYSTEM_TESSDATA/$subdir not found — install tesseract-ocr first"
+  fi
+done
+
 echo ""
 echo "All models ready. Next steps:"
 echo "  flutter build linux   → tessdata/ bundled next to the binary"

@@ -132,6 +132,5 @@ set(TESSDATA_DIR "${CMAKE_SOURCE_DIR}/../../tessdata")
 if(EXISTS "${TESSDATA_DIR}")
   install(DIRECTORY "${TESSDATA_DIR}/"
     DESTINATION "${CMAKE_INSTALL_PREFIX}/tessdata"
-    COMPONENT Runtime
-    FILES_MATCHING PATTERN "*.traineddata")
+    COMPONENT Runtime)
 endif()

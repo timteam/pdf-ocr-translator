@@ -8,6 +8,7 @@ description: |
   processing happens locally on your device — no backend, no cloud.
 
 license: Apache-2.0
+website: https://github.com/timteam/pdf-ocr-translator
 contact: timothee.troncy@gmail.com
 
 grade: devel
@@ -18,6 +19,7 @@ build-base: devel
 lint:
   ignore:
     - library
+    - classic
 
 apps:
   pdf-ocr-translator:
@@ -60,10 +62,11 @@ parts:
     stage-packages:
       - poppler-utils
       - tesseract-ocr
-    # Exclure les tessdata installés par les dépendances apt (tesseract-ocr-eng,
-    # etc.) — remplacés par les modèles best du part tessdata-best ci-dessous.
+    # Exclure uniquement les .traineddata apt (remplacés par tessdata-best)
+    # mais conserver configs/ et tessconfigs/ dont tesseract a besoin
+    # pour produire la sortie TSV (read_params_file: Can't open tsv sinon).
     stage:
-      - -usr/share/tesseract-ocr/5/tessdata/
+      - -usr/share/tesseract-ocr/5/tessdata/*.traineddata
     prime:
       - -usr/lib/x86_64-linux-gnu/libicuio.so*
       - -usr/lib/x86_64-linux-gnu/libicutest.so*
