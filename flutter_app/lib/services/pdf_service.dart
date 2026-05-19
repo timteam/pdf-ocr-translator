@@ -24,6 +24,14 @@ const double _phaseWrite = 0.10;
 // Reçoit les données brutes d'une page, génère et retourne les bytes PDF.
 const _rtlLanguages = {'ar', 'he', 'fa', 'ur'};
 
+// Taille de police proportionnelle à la surface du bloc original.
+// Cible : le texte traduit couvre la même aire que le texte source.
+double _estimateFontSize(double bWidth, double bHeight, int charCount) {
+  if (charCount == 0) return 10.0;
+  final fs = sqrt(bWidth * bHeight / (charCount * 0.7));
+  return fs.clamp(7.0, 16.0);
+}
+
 Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
   final imageBytes = data['imageBytes'] as Uint8List;
   final ptWidth = data['ptWidth'] as double;
@@ -33,7 +41,6 @@ Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
 
   final isRtl = _rtlLanguages.contains(targetLanguage);
   final textAlign = isRtl ? pw.TextAlign.right : pw.TextAlign.left;
-  final alignment = isRtl ? pw.Alignment.topRight : pw.Alignment.topLeft;
 
   final fontBytesRaw = data['fontBytes'] as Uint8List?;
   final font = fontBytesRaw != null
@@ -51,26 +58,18 @@ Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
           .map((b) {
           final bWidth = b['width'] as double;
           final bHeight = b['height'] as double;
+          final text = b['text'] as String;
+          final fontSize = _estimateFontSize(bWidth, bHeight, text.length);
           return pw.Positioned(
             left: b['left'] as double,
             top: b['top'] as double,
-            child: pw.SizedBox(
+            child: pw.Container(
               width: bWidth,
-              height: bHeight,
-              child: pw.Container(
-                color: PdfColor.fromInt(0x66FFFFFF),
-                child: pw.FittedBox(
-                  fit: pw.BoxFit.scaleDown,
-                  alignment: alignment,
-                  child: pw.SizedBox(
-                    width: bWidth,
-                    child: pw.Text(
-                      b['text'] as String,
-                      style: pw.TextStyle(fontSize: 12, color: PdfColors.black, font: font),
-                      textAlign: textAlign,
-                    ),
-                  ),
-                ),
+              color: PdfColors.white,
+              child: pw.Text(
+                text,
+                style: pw.TextStyle(fontSize: fontSize, color: PdfColors.black, font: font),
+                textAlign: textAlign,
               ),
             ),
           );

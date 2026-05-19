@@ -56,21 +56,42 @@ class OCRService {
       final preprocessed = await _preprocessImage(imageFile, tempDir);
       ownTempFiles.add(preprocessed.path);
 
-      // Étape 2 : passe 1 — détection des régions (niveau 2 = blocs)
-      final blockRects = await _detectBlockRects(preprocessed, tessLang, tempDir);
-      logger.i('Passe 1 — régions détectées: ${blockRects.length}');
+      // Étape 2 : passe 1 — détection des régions sur image normale
+      var blockRects = await _detectBlockRects(preprocessed, tessLang, tempDir);
+      logger.i('Passe 1 (normale) — régions détectées: ${blockRects.length}');
 
-      if (blockRects.isEmpty) {
-        logger.w('Aucune région détectée — fallback OCR pleine page (psm 3)');
-        final fallbackBlocks = await _runOCR(preprocessed, tessLang, tempDir, psm: '3');
-        logger.i('Fallback pleine page: ${fallbackBlocks.length} bloc(s)');
-        return fallbackBlocks;
+      // Passe 1 bis sur image inversée : capte les zones à texte blanc sur fond sombre
+      final srcBytes = await preprocessed.readAsBytes();
+      final srcDecoded = img.decodeImage(srcBytes);
+      if (srcDecoded != null) {
+        final inverted = img.invert(img.copyCrop(srcDecoded,
+            x: 0, y: 0, width: srcDecoded.width, height: srcDecoded.height));
+        final invPath = p.join(tempDir.path, 'inv_${DateTime.now().millisecondsSinceEpoch}.png');
+        await File(invPath).writeAsBytes(img.encodePng(inverted));
+        ownTempFiles.add(invPath);
+        final invRects = await _detectBlockRects(File(invPath), tessLang, tempDir);
+        if (invRects.isNotEmpty) {
+          final added = _mergeRects(blockRects, invRects);
+          logger.i('Passe 1 (inversée) — ${invRects.length} régions → ${added.length - blockRects.length} nouvelles');
+          blockRects = added;
+        }
       }
 
-      // Pré-décode l'image une seule fois pour tous les recadrages
-      final srcDecoded = img.decodeImage(await preprocessed.readAsBytes());
+      logger.i('Passe 1 total — ${blockRects.length} région(s)');
 
-      // Étape 3 : passe 2 — OCR par région indépendante (--psm 6)
+      if (blockRects.isEmpty) {
+        // Fallback pleine page : PSM 3 puis PSM 11 (sparse text) si toujours vide
+        logger.w('Aucune région détectée — fallback pleine page');
+        var fallback = await _runOCR(preprocessed, tessLang, tempDir, psm: '3');
+        if (fallback.isEmpty) {
+          logger.w('PSM 3 vide — essai PSM 11 (sparse text)');
+          fallback = await _runOCR(preprocessed, tessLang, tempDir, psm: '11');
+        }
+        logger.i('Fallback pleine page: ${fallback.length} bloc(s)');
+        return fallback;
+      }
+
+      // Étape 3 : passe 2 — OCR par région (--psm 6) avec inversion si fond sombre
       final result = <OCRTextBlock>[];
       for (int ri = 0; ri < blockRects.length; ri++) {
         final rect = blockRects[ri];
@@ -78,11 +99,19 @@ class OCRService {
         final crop = _cropRegion(srcDecoded, rect);
         if (crop == null) continue;
 
+        // Inverser le crop si le fond est majoritairement sombre (texte blanc sur noir)
+        final dark = _isDarkRegion(crop.image);
+        final cropImage = dark
+            ? img.invert(img.copyCrop(crop.image, x: 0, y: 0,
+                width: crop.image.width, height: crop.image.height))
+            : crop.image;
+        if (dark) logger.d('  région[$ri]: fond sombre → inversion appliquée');
+
         final cropPath = p.join(
           tempDir.path,
           'crop_${rect.left.toInt()}_${rect.top.toInt()}_${DateTime.now().microsecondsSinceEpoch}.png',
         );
-        await File(cropPath).writeAsBytes(img.encodePng(crop.image));
+        await File(cropPath).writeAsBytes(img.encodePng(cropImage));
         ownTempFiles.add(cropPath);
 
         final blocks = await _runOCR(
@@ -102,6 +131,41 @@ class OCRService {
         try { await File(path).delete(); } catch (_) {}
       }
     }
+  }
+
+  // Retourne true si la luminance moyenne de l'image est < 127 (fond sombre)
+  bool _isDarkRegion(img.Image image) {
+    int sum = 0;
+    int count = 0;
+    final stepX = max(1, image.width ~/ 20);
+    final stepY = max(1, image.height ~/ 20);
+    for (int y = 0; y < image.height; y += stepY) {
+      for (int x = 0; x < image.width; x += stepX) {
+        sum += image.getPixel(x, y).r.toInt();
+        count++;
+      }
+    }
+    return count > 0 && (sum ~/ count) < 127;
+  }
+
+  // Fusionne deux listes de Rect en écartant les doublons (IoU > 0.3)
+  List<Rect> _mergeRects(List<Rect> base, List<Rect> additional) {
+    final result = List<Rect>.from(base);
+    for (final newRect in additional) {
+      final overlap = base.any((r) => _iou(r, newRect) > 0.3);
+      if (!overlap) result.add(newRect);
+    }
+    return result;
+  }
+
+  double _iou(Rect a, Rect b) {
+    final il = max(a.left, b.left);
+    final it = max(a.top, b.top);
+    final ir = min(a.right, b.right);
+    final ib = min(a.bottom, b.bottom);
+    if (ir <= il || ib <= it) return 0;
+    final inter = (ir - il) * (ib - it);
+    return inter / (a.width * a.height + b.width * b.height - inter);
   }
 
   // Niveaux de gris + normalisation pour améliorer le contraste des scans
