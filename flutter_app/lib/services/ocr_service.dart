@@ -256,7 +256,10 @@ class OCRService {
 
     var gray = img.grayscale(src);
     gray = img.normalize(gray, min: 0, max: 255);
-    final processed = _adaptiveSauvola(gray);
+    // Pas de pré-flou : les traits fins (~3 px à 400 DPI) doivent rester nets
+    // pour survivre au seuillage. L'ouverture morphologique post-binarisation
+    // suffit à éliminer le grain (pixels isolés 1 px).
+    final processed = _morphologicalOpen(_adaptiveSauvola(gray));
 
     final outPath = p.join(tempDir.path, 'prep_${DateTime.now().millisecondsSinceEpoch}.png');
     await File(outPath).writeAsBytes(img.encodePng(processed));
@@ -307,12 +310,57 @@ class OCRService {
     return count > 0 ? blacks / count : 0.0;
   }
 
+  // Ouverture morphologique 3×3 (érosion puis dilatation) sur image binaire.
+  // Supprime les pixels noirs isolés (grain de scan) tout en préservant les
+  // traits de caractères (largeur ≥ 3 px). Opère sur Uint8List pour la vitesse.
+  img.Image _morphologicalOpen(img.Image binary) {
+    final w = binary.width;
+    final h = binary.height;
+
+    final src = Uint8List(w * h);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        src[y * w + x] = binary.getPixel(x, y).r.toInt();
+      }
+    }
+
+    // Érosion : pixel noir seulement si les 9 voisins sont tous noirs
+    final eroded = Uint8List(w * h);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        bool all = true;
+        for (int dy = -1; dy <= 1 && all; dy++) {
+          for (int dx = -1; dx <= 1 && all; dx++) {
+            if (src[(y + dy).clamp(0, h - 1) * w + (x + dx).clamp(0, w - 1)] != 0) all = false;
+          }
+        }
+        eroded[y * w + x] = all ? 0 : 255;
+      }
+    }
+
+    // Dilatation : pixel noir si au moins un voisin est noir
+    final out = img.Image(width: w, height: h, numChannels: 3);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        bool any = false;
+        for (int dy = -1; dy <= 1 && !any; dy++) {
+          for (int dx = -1; dx <= 1 && !any; dx++) {
+            if (eroded[(y + dy).clamp(0, h - 1) * w + (x + dx).clamp(0, w - 1)] == 0) any = true;
+          }
+        }
+        final v = any ? 0 : 255;
+        out.setPixelRgb(x, y, v, v, v);
+      }
+    }
+    return out;
+  }
+
   // Binarisation de Sauvola avec images intégrales (O(n), indépendant de la
-  // taille de fenêtre). Fenêtre 31×31 px ≈ 2,6 mm à 300 DPI — bonne pour
+  // taille de fenêtre). Fenêtre 65×65 px ≈ 4,1 mm à 400 DPI — bonne pour
   // texte de toutes tailles sur documents scannés.
   // Formule : threshold = mean × (1 + k × (stddev/R − 1)), R=128.
   img.Image _sauvolaBinarize(img.Image gray,
-      {int windowSize = 31, double k = 0.25, double r = 128.0}) {
+      {int windowSize = 65, double k = 0.25, double r = 128.0}) {
     final w = gray.width;
     final h = gray.height;
     final stride = w + 1;
@@ -330,7 +378,7 @@ class OCRService {
     }
 
     final half = windowSize ~/ 2;
-    final out = img.Image(width: w, height: h);
+    final out = img.Image(width: w, height: h, numChannels: 3);
 
     for (int y = 0; y < h; y++) {
       final y1 = max(0, y - half);
