@@ -18,6 +18,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String? selectedSourceLanguage;
   String? selectedTargetLanguage;
   String? selectedPdfPath;
+  bool _debugMode = false;
 
   @override
   void initState() {
@@ -76,6 +77,7 @@ class _HomeScreenState extends State<HomeScreen> {
         'sourceLanguage': selectedSourceLanguage,
         'targetLanguage': selectedTargetLanguage,
         'outputPath': outputPath,
+        'debugMode': _debugMode,
       });
     }
   }
@@ -260,7 +262,22 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-              const SizedBox(height: 40),
+              const SizedBox(height: 8),
+
+              // Mode debug
+              CheckboxListTile(
+                value: _debugMode,
+                onChanged: (v) => setState(() => _debugMode = v ?? false),
+                title: const Text('Mode debug'),
+                subtitle: const Text(
+                  'Enregistre le log et les images préprocessées dans un sous-répertoire',
+                  style: TextStyle(fontSize: 12),
+                ),
+                controlAffinity: ListTileControlAffinity.leading,
+                contentPadding: EdgeInsets.zero,
+              ),
+
+              const SizedBox(height: 24),
 
               // Bouton lancer
               ElevatedButton.icon(

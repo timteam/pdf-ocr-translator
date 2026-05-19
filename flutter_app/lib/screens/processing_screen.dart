@@ -11,6 +11,7 @@ class ProcessingScreen extends StatefulWidget {
   final String? sourceLanguage;
   final String? targetLanguage;
   final String? outputPath;
+  final bool debugMode;
 
   const ProcessingScreen({
     Key? key,
@@ -18,6 +19,7 @@ class ProcessingScreen extends StatefulWidget {
     this.sourceLanguage,
     this.targetLanguage,
     this.outputPath,
+    this.debugMode = false,
   }) : super(key: key);
 
   @override
@@ -62,6 +64,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         onProgress: (update) {
           if (mounted) setState(() => _update = update);
         },
+        debugMode: widget.debugMode,
       );
 
       if (mounted) {

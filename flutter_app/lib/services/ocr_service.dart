@@ -260,6 +260,14 @@ class OCRService {
 
     final outPath = p.join(tempDir.path, 'prep_${DateTime.now().millisecondsSinceEpoch}.png');
     await File(outPath).writeAsBytes(img.encodePng(processed));
+
+    final debugDir = AppLogger.debugDir;
+    if (debugDir != null) {
+      final m = RegExp(r'page_(\d+)_').firstMatch(p.basename(imageFile.path));
+      final name = 'prep_page_${m?.group(1) ?? DateTime.now().millisecondsSinceEpoch}.png';
+      try { await File(outPath).copy(p.join(debugDir, name)); } catch (_) {}
+    }
+
     return File(outPath);
   }
 

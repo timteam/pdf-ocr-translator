@@ -67,6 +67,7 @@ class MyApp extends StatelessWidget {
               sourceLanguage: extra?['sourceLanguage'],
               targetLanguage: extra?['targetLanguage'],
               outputPath: extra?['outputPath'],
+              debugMode: extra?['debugMode'] as bool? ?? false,
             );
           },
         ),

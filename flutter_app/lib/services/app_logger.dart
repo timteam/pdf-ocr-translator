@@ -28,16 +28,27 @@ class _DynamicFileOutput extends LogOutput {
 }
 
 class AppLogger {
-  static File? _logFile;
-  static final _fileOutput = _DynamicFileOutput();
+  static File?   _logFile;
+  static String? _debugDir;
+  static final   _fileOutput = _DynamicFileOutput();
 
-  // Appelé au début de chaque processPDF : crée/écrase le fichier de log
-  // à côté du PDF de sortie (même nom, extension .log).
-  static void setOutputPath(String outputPath) {
-    final logPath = p.join(
-      p.dirname(outputPath),
-      '${p.basenameWithoutExtension(outputPath)}.log',
-    );
+  // Répertoire de debug : <dir>/<stem>/ (null si debug désactivé)
+  static String? get debugDir => _debugDir;
+  static String? get logPath  => _logFile?.path;
+
+  // Appelé au début de chaque processPDF.
+  // Sans debug : log console uniquement, pas de répertoire créé.
+  // Avec debug  : crée <dir>/<stem>/ et y écrit le log + les images de préprocessing.
+  static void setOutputPath(String outputPath, {bool debug = false}) {
+    if (!debug) {
+      _logFile  = null;
+      _debugDir = null;
+      return;
+    }
+    final stem = p.basenameWithoutExtension(outputPath);
+    _debugDir  = p.join(p.dirname(outputPath), stem);
+    Directory(_debugDir!).createSync(recursive: true);
+    final logPath = p.join(_debugDir!, '$stem.log');
     _logFile = File(logPath);
     _logFile!.writeAsStringSync(
       '=== Traitement démarré ${DateTime.now().toIso8601String()} ===\n'
@@ -52,6 +63,4 @@ class AppLogger {
     printer: SimplePrinter(printTime: true, colors: false),
     output: MultiOutput([ConsoleOutput(), _fileOutput]),
   );
-
-  static String? get logPath => _logFile?.path;
 }

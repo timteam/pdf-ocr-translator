@@ -155,12 +155,13 @@ class PDFProcessingService {
     required String targetLanguage,
     required String outputPath,
     required Function(ProcessingUpdate) onProgress,
+    bool debugMode = false,
   }) async {
     final List<String> tempPagePdfs = [];
     final List<String> tempImages = [];
 
     try {
-      AppLogger.setOutputPath(outputPath);
+      AppLogger.setOutputPath(outputPath, debug: debugMode);
       logger.i('=== processPDF démarré ===');
       logger.i('  PDF source   : ${pdfFile.path}');
       logger.i('  Langue src   : $sourceLanguage');
