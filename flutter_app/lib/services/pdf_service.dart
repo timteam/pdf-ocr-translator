@@ -189,14 +189,14 @@ class PDFProcessingService {
         final ptHeight = decoded.height * 72.0 / _renderDpi;
         final pixelToPoint = 72.0 / _renderDpi;
 
-        // Étape 2 — OCR
-        await _emit(onProgress, ProcessingUpdate(
-          currentPage: pageIndex, totalPages: pageCount,
-          stepName: 'Extraction OCR du texte…',
-          stepProgress: _phaseRender,
-        ));
+        // Étape 2 — OCR (progress émis depuis l'intérieur de extractTextBlocks)
         final textBlocks = await _ocrService.extractTextBlocks(
           imageFile, language: sourceLanguage,
+          onProgress: (ocrFraction, ocrStep) => _emit(onProgress, ProcessingUpdate(
+            currentPage: pageIndex, totalPages: pageCount,
+            stepName: ocrStep,
+            stepProgress: _phaseRender + ocrFraction * _phaseOCR,
+          )),
         );
         logger.i('Page $pageIndex: ${textBlocks.length} bloc(s) OCR après filtrage');
         for (int i = 0; i < textBlocks.length; i++) {

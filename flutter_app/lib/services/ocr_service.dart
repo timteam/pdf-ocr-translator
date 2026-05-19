@@ -6,6 +6,42 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'app_logger.dart';
 
+/// Lance un tick loop en parallèle d'une opération async longue.
+/// Avance la fraction de [start] vers [end] avec une courbe ease-out,
+/// sans jamais dépasser [end]. S'arrête dès que [work] se termine.
+/// Fonctionne uniquement pour les opérations genuinement async (Process.run).
+Future<T> _withSimulatedProgress<T>(
+  Future<T> work, {
+  required Future<void> Function(double, String)? onProgress,
+  required double start,
+  required double end,
+  required String label,
+  required int expectedMs,
+}) async {
+  if (onProgress == null) return work;
+  var active = true;
+  final began = DateTime.now();
+
+  Future<void> tick() async {
+    while (active) {
+      await Future.delayed(const Duration(milliseconds: 250));
+      if (!active) break;
+      final ms = DateTime.now().difference(began).inMilliseconds;
+      // ease-out : rapide au début, ralentit en approchant du seuil haut
+      final t = (1.0 - exp(-ms / expectedMs * 2.0)).clamp(0.0, 0.99);
+      await onProgress(start + (end - start) * t, label);
+    }
+  }
+
+  // ignore: unawaited_futures
+  tick();
+  try {
+    return await work;
+  } finally {
+    active = false;
+  }
+}
+
 class OCRService {
   final logger = AppLogger.build();
 
@@ -46,21 +82,30 @@ class OCRService {
   Future<List<OCRTextBlock>> extractTextBlocks(
     File imageFile, {
     String language = 'en',
+    Future<void> Function(double fraction, String stepName)? onProgress,
   }) async {
     final tessLang = _toTesseractLang(language);
     final tempDir = await getTemporaryDirectory();
     final ownTempFiles = <String>[];
 
     try {
-      // Étape 1 : prétraitement
+      // Étape 1 : prétraitement (~4s, 2% du temps total OCR)
+      await onProgress?.call(0.00, 'Prétraitement de l\'image…');
       final preprocessed = await _preprocessImage(imageFile, tempDir);
       ownTempFiles.add(preprocessed.path);
 
-      // Étape 2 : passe 1 — détection des régions sur image normale
-      var blockRects = await _detectBlockRects(preprocessed, tessLang, tempDir);
+      // Étape 2 : passe 1 — détection des régions sur image normale (~20% du temps total)
+      await onProgress?.call(0.02, 'Détection des zones de texte…');
+      var blockRects = await _withSimulatedProgress(
+        _detectBlockRects(preprocessed, tessLang, tempDir),
+        onProgress: onProgress, start: 0.02, end: 0.22,
+        label: 'Détection des zones de texte…', expectedMs: 20000,
+      );
       logger.i('Passe 1 (normale) — régions détectées: ${blockRects.length}');
 
       // Passe 1 bis sur image inversée : capte les zones à texte blanc sur fond sombre
+      // Inversion+écriture (~3s, 1.5%) puis tesseract (~26% du temps total)
+      await onProgress?.call(0.22, 'Inversion de l\'image…');
       final srcBytes = await preprocessed.readAsBytes();
       final srcDecoded = img.decodeImage(srcBytes);
       if (srcDecoded != null) {
@@ -69,7 +114,12 @@ class OCRService {
         final invPath = p.join(tempDir.path, 'inv_${DateTime.now().millisecondsSinceEpoch}.png');
         await File(invPath).writeAsBytes(img.encodePng(inverted));
         ownTempFiles.add(invPath);
-        final invRects = await _detectBlockRects(File(invPath), tessLang, tempDir);
+        await onProgress?.call(0.25, 'Détection des zones sombres…');
+        final invRects = await _withSimulatedProgress(
+          _detectBlockRects(File(invPath), tessLang, tempDir),
+          onProgress: onProgress, start: 0.25, end: 0.50,
+          label: 'Détection des zones sombres…', expectedMs: 25000,
+        );
         if (invRects.isNotEmpty) {
           final added = _mergeRects(blockRects, invRects);
           logger.i('Passe 1 (inversée) — ${invRects.length} régions → ${added.length - blockRects.length} nouvelles');
@@ -82,18 +132,33 @@ class OCRService {
       if (blockRects.isEmpty) {
         // Fallback pleine page : PSM 3 puis PSM 11 (sparse text) si toujours vide
         logger.w('Aucune région détectée — fallback pleine page');
-        var fallback = await _runOCR(preprocessed, tessLang, tempDir, psm: '3');
+        await onProgress?.call(0.52, 'OCR pleine page (fallback)…');
+        var fallback = await _withSimulatedProgress(
+          _runOCR(preprocessed, tessLang, tempDir, psm: '3'),
+          onProgress: onProgress, start: 0.52, end: 0.80,
+          label: 'OCR pleine page (fallback)…', expectedMs: 20000,
+        );
         if (fallback.isEmpty) {
           logger.w('PSM 3 vide — essai PSM 11 (sparse text)');
-          fallback = await _runOCR(preprocessed, tessLang, tempDir, psm: '11');
+          await onProgress?.call(0.80, 'OCR pleine page (sparse)…');
+          fallback = await _withSimulatedProgress(
+            _runOCR(preprocessed, tessLang, tempDir, psm: '11'),
+            onProgress: onProgress, start: 0.80, end: 1.00,
+            label: 'OCR pleine page (sparse)…', expectedMs: 15000,
+          );
         }
         logger.i('Fallback pleine page: ${fallback.length} bloc(s)');
+        await onProgress?.call(1.00, 'Extraction terminée');
         return fallback;
       }
 
-      // Étape 3 : passe 2 — OCR par région (--psm 6) avec inversion si fond sombre
+      // Étape 3 : passe 2 — OCR par région (--psm 6) (~50% du temps total, uniforme par région)
+      final n = blockRects.length;
       final result = <OCRTextBlock>[];
-      for (int ri = 0; ri < blockRects.length; ri++) {
+      for (int ri = 0; ri < n; ri++) {
+        final blockStart = 0.50 + 0.50 * ri / n;
+        final blockEnd   = 0.50 + 0.50 * (ri + 1) / n;
+        await onProgress?.call(blockStart, 'OCR zone ${ri + 1}/$n…');
         final rect = blockRects[ri];
         if (srcDecoded == null) break;
         final crop = _cropRegion(srcDecoded, rect);
@@ -114,16 +179,17 @@ class OCRService {
         await File(cropPath).writeAsBytes(img.encodePng(cropImage));
         ownTempFiles.add(cropPath);
 
-        final blocks = await _runOCR(
-          File(cropPath), tessLang, tempDir,
-          psm: '6',
-          offsetX: crop.originX,
-          offsetY: crop.originY,
+        final blocks = await _withSimulatedProgress(
+          _runOCR(File(cropPath), tessLang, tempDir, psm: '6',
+              offsetX: crop.originX, offsetY: crop.originY),
+          onProgress: onProgress, start: blockStart, end: blockEnd,
+          label: 'OCR zone ${ri + 1}/$n…', expectedMs: 2500,
         );
         logger.d('  région[$ri] ${rect.width.toInt()}×${rect.height.toInt()} → ${blocks.length} bloc(s)');
         result.addAll(blocks);
       }
 
+      await onProgress?.call(1.00, 'Extraction terminée');
       logger.i('Passe 2 — total blocs avant filtrage garbage: ${result.length}');
       return result;
     } finally {
