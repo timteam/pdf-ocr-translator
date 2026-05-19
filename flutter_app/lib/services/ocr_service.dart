@@ -101,6 +101,7 @@ class OCRService {
         onProgress: onProgress, start: 0.02, end: 0.22,
         label: 'Détection des zones de texte…', expectedMs: 20000,
       );
+      blockRects = _selfDeduplicate(blockRects);
       logger.i('Passe 1 (normale) — régions détectées: ${blockRects.length}');
 
       // Passe 1 bis sur image inversée : capte les zones à texte blanc sur fond sombre
@@ -217,10 +218,18 @@ class OCRService {
   // Fusionne deux listes de Rect en écartant les doublons par test de centre.
   // Un candidat est doublon si le centre de l'un tombe dans l'autre (bidirectionnel),
   // ce qui est insensible aux différences de taille entre les deux passes.
+  List<Rect> _selfDeduplicate(List<Rect> rects) {
+    final result = <Rect>[];
+    for (final r in rects) {
+      if (!result.any((e) => _centersOverlap(e, r))) result.add(r);
+    }
+    return result;
+  }
+
   List<Rect> _mergeRects(List<Rect> base, List<Rect> additional) {
     final result = List<Rect>.from(base);
     for (final candidate in additional) {
-      final isDuplicate = base.any((r) => _centersOverlap(r, candidate));
+      final isDuplicate = result.any((r) => _centersOverlap(r, candidate));
       if (!isDuplicate) result.add(candidate);
     }
     return result;
