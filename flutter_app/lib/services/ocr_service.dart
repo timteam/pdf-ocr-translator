@@ -83,6 +83,7 @@ class OCRService {
   Future<List<OCRTextBlock>> extractTextBlocks(
     File imageFile, {
     String language = 'en',
+    int dpi = 600,
     Future<void> Function(double fraction, String stepName)? onProgress,
   }) async {
     final tessLang = _toTesseractLang(language);
@@ -98,7 +99,7 @@ class OCRService {
       // Étape 2 : passe 1 — détection des régions sur image normale (~20% du temps total)
       await onProgress?.call(0.02, 'Détection des zones de texte…');
       var blockRects = await _withSimulatedProgress(
-        _detectBlockRects(preprocessed, tessLang, tempDir),
+        _detectBlockRects(preprocessed, tessLang, tempDir, dpi: dpi),
         onProgress: onProgress, start: 0.02, end: 0.22,
         label: 'Détection des zones de texte…', expectedMs: 20000,
       );
@@ -118,7 +119,7 @@ class OCRService {
         ownTempFiles.add(invPath);
         await onProgress?.call(0.25, 'Détection des zones sombres…');
         final invRects = await _withSimulatedProgress(
-          _detectBlockRects(File(invPath), tessLang, tempDir),
+          _detectBlockRects(File(invPath), tessLang, tempDir, dpi: dpi),
           onProgress: onProgress, start: 0.25, end: 0.50,
           label: 'Détection des zones sombres…', expectedMs: 25000,
         );
@@ -136,7 +137,7 @@ class OCRService {
         logger.w('Aucune région détectée — fallback pleine page');
         await onProgress?.call(0.52, 'OCR pleine page (fallback)…');
         var fallback = await _withSimulatedProgress(
-          _runOCR(preprocessed, tessLang, tempDir, psm: '3'),
+          _runOCR(preprocessed, tessLang, tempDir, psm: '3', dpi: dpi),
           onProgress: onProgress, start: 0.52, end: 0.80,
           label: 'OCR pleine page (fallback)…', expectedMs: 20000,
         );
@@ -144,7 +145,7 @@ class OCRService {
           logger.w('PSM 3 vide — essai PSM 11 (sparse text)');
           await onProgress?.call(0.80, 'OCR pleine page (sparse)…');
           fallback = await _withSimulatedProgress(
-            _runOCR(preprocessed, tessLang, tempDir, psm: '11'),
+            _runOCR(preprocessed, tessLang, tempDir, psm: '11', dpi: dpi),
             onProgress: onProgress, start: 0.80, end: 1.00,
             label: 'OCR pleine page (sparse)…', expectedMs: 15000,
           );
@@ -183,7 +184,7 @@ class OCRService {
 
         final blocks = await _withSimulatedProgress(
           _runOCR(File(cropPath), tessLang, tempDir, psm: '6',
-              offsetX: crop.originX, offsetY: crop.originY),
+              dpi: dpi, offsetX: crop.originX, offsetY: crop.originY),
           onProgress: onProgress, start: blockStart, end: blockEnd,
           label: 'OCR zone ${ri + 1}/$n…', expectedMs: 2500,
         );
@@ -356,11 +357,11 @@ class OCRService {
   }
 
   // Binarisation de Sauvola avec images intégrales (O(n), indépendant de la
-  // taille de fenêtre). Fenêtre 65×65 px ≈ 4,1 mm à 400 DPI — bonne pour
+  // taille de fenêtre). Fenêtre 97×97 px ≈ 4,1 mm à 600 DPI — bonne pour
   // texte de toutes tailles sur documents scannés.
   // Formule : threshold = mean × (1 + k × (stddev/R − 1)), R=128.
   img.Image _sauvolaBinarize(img.Image gray,
-      {int windowSize = 65, double k = 0.25, double r = 128.0}) {
+      {int windowSize = 97, double k = 0.25, double r = 128.0}) {
     final w = gray.width;
     final h = gray.height;
     final stride = w + 1;
@@ -404,11 +405,11 @@ class OCRService {
 
   // Passe 1 : récupère les bounding boxes de niveau 2 (blocs Tesseract)
   Future<List<Rect>> _detectBlockRects(
-    File imageFile, String tessLang, Directory tempDir,
+    File imageFile, String tessLang, Directory tempDir, {int dpi = 600}
   ) async {
     final outputBase = p.join(tempDir.path, 'det_${DateTime.now().millisecondsSinceEpoch}');
     final env = await _tessdataEnv();
-    final args1 = [imageFile.path, outputBase, '-l', tessLang, 'tsv'];
+    final args1 = [imageFile.path, outputBase, '-l', tessLang, '--oem', '1', '--dpi', '$dpi', 'tsv'];
     logger.d('tesseract (passe1) ${args1.join(' ')}');
     var result = await Process.run('tesseract', args1, environment: env);
     logger.d('tesseract passe1 exit=${result.exitCode}');
@@ -417,7 +418,7 @@ class OCRService {
     if (result.exitCode != 0 && tessLang.contains('+')) {
       final baseLang = tessLang.split('+').first;
       logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
-      final args2 = [imageFile.path, outputBase, '-l', baseLang, 'tsv'];
+      final args2 = [imageFile.path, outputBase, '-l', baseLang, '--oem', '1', '--dpi', '$dpi', 'tsv'];
       logger.d('tesseract (passe1-fallback) ${args2.join(' ')}');
       result = await Process.run('tesseract', args2, environment: env);
       logger.d('tesseract passe1-fallback exit=${result.exitCode}');
@@ -475,12 +476,13 @@ class OCRService {
   Future<List<OCRTextBlock>> _runOCR(
     File imageFile, String tessLang, Directory tempDir, {
     required String psm,
+    int dpi = 600,
     double offsetX = 0,
     double offsetY = 0,
   }) async {
     final outputBase = p.join(tempDir.path, 'ocr_${DateTime.now().millisecondsSinceEpoch}');
     final env = await _tessdataEnv();
-    final args1 = [imageFile.path, outputBase, '-l', tessLang, '--psm', psm, 'tsv'];
+    final args1 = [imageFile.path, outputBase, '-l', tessLang, '--oem', '1', '--dpi', '$dpi', '--psm', psm, 'tsv'];
     logger.d('tesseract (passe2 psm=$psm) ${args1.join(' ')}');
     var result = await Process.run('tesseract', args1, environment: env);
     logger.d('tesseract passe2 exit=${result.exitCode}');
@@ -489,7 +491,7 @@ class OCRService {
     if (result.exitCode != 0 && tessLang.contains('+')) {
       final baseLang = tessLang.split('+').first;
       logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
-      final args2 = [imageFile.path, outputBase, '-l', baseLang, '--psm', psm, 'tsv'];
+      final args2 = [imageFile.path, outputBase, '-l', baseLang, '--oem', '1', '--dpi', '$dpi', '--psm', psm, 'tsv'];
       logger.d('tesseract (passe2-fallback psm=$psm) ${args2.join(' ')}');
       result = await Process.run('tesseract', args2, environment: env);
       logger.d('tesseract passe2-fallback exit=${result.exitCode}');

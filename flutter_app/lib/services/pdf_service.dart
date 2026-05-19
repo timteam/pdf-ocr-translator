@@ -13,7 +13,7 @@ import 'ocr_service.dart';
 import 'translation_service.dart';
 import '../models/processing.dart';
 
-const int _renderDpi = 400;
+const int _renderDpi = 600;
 
 const double _phaseRender = 0.10;
 const double _phaseOCR = 0.35;
@@ -204,6 +204,7 @@ class PDFProcessingService {
         // Étape 2 — OCR (progress émis depuis l'intérieur de extractTextBlocks)
         final textBlocks = await _ocrService.extractTextBlocks(
           imageFile, language: sourceLanguage,
+          dpi: _renderDpi,
           onProgress: (ocrFraction, ocrStep) => _emit(onProgress, ProcessingUpdate(
             currentPage: pageIndex, totalPages: pageCount,
             stepName: ocrStep,
