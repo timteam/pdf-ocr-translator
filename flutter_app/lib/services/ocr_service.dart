@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' show Rect;
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
@@ -244,18 +245,105 @@ class OCRService {
     return aCx >= b.left && aCx <= b.right && aCy >= b.top && aCy <= b.bottom;
   }
 
-  // Niveaux de gris + normalisation pour améliorer le contraste des scans
+  // Niveaux de gris → normalisation → binarisation Sauvola.
+  // Sauvola calcule un seuil local par fenêtre glissante (mean + k×stddev/R),
+  // ce qui adapte le seuil à chaque zone : robuste au bruit sur grands
+  // caractères ET préserve les fins traits des petits caractères.
   Future<File> _preprocessImage(File imageFile, Directory tempDir) async {
     final bytes = await imageFile.readAsBytes();
     final src = img.decodeImage(bytes);
     if (src == null) return imageFile;
 
-    var processed = img.grayscale(src);
-    processed = img.normalize(processed, min: 0, max: 255);
+    var gray = img.grayscale(src);
+    gray = img.normalize(gray, min: 0, max: 255);
+    final processed = _adaptiveSauvola(gray);
 
     final outPath = p.join(tempDir.path, 'prep_${DateTime.now().millisecondsSinceEpoch}.png');
     await File(outPath).writeAsBytes(img.encodePng(processed));
     return File(outPath);
+  }
+
+  // Ajuste k par recherche binaire (max 4 passes) jusqu'à ce que la densité
+  // de pixels noirs soit dans [5 %, 30 %], plage typique pour un document imprimé.
+  // Relation : k ↑ → seuil ↓ → moins de noirs ; k ↓ → seuil ↑ → plus de noirs.
+  img.Image _adaptiveSauvola(img.Image gray) {
+    double kLo = 0.02, kHi = 0.80, k = 0.25;
+    img.Image result = _sauvolaBinarize(gray, k: k);
+
+    for (int iter = 0; iter < 4; iter++) {
+      final density = _blackPixelDensity(result);
+      logger.d('Sauvola iter=$iter k=${k.toStringAsFixed(3)} densité=${(density * 100).toStringAsFixed(1)}%');
+      if (density >= 0.05 && density <= 0.30) break;
+      if (density < 0.05) {
+        kHi = k; // trop peu de noirs → baisser k pour abaisser le seuil
+      } else {
+        kLo = k; // trop de noirs → monter k pour relever le seuil
+      }
+      k = (kLo + kHi) / 2.0;
+      result = _sauvolaBinarize(gray, k: k);
+    }
+    return result;
+  }
+
+  // Échantillonne 1 pixel sur 16 (step=4 sur chaque axe) → 16× plus rapide,
+  // erreur < 1 % sur des images naturelles.
+  double _blackPixelDensity(img.Image binary) {
+    const step = 4;
+    int blacks = 0, count = 0;
+    for (int y = 0; y < binary.height; y += step) {
+      for (int x = 0; x < binary.width; x += step) {
+        if (binary.getPixel(x, y).r.toInt() == 0) blacks++;
+        count++;
+      }
+    }
+    return count > 0 ? blacks / count : 0.0;
+  }
+
+  // Binarisation de Sauvola avec images intégrales (O(n), indépendant de la
+  // taille de fenêtre). Fenêtre 31×31 px ≈ 2,6 mm à 300 DPI — bonne pour
+  // texte de toutes tailles sur documents scannés.
+  // Formule : threshold = mean × (1 + k × (stddev/R − 1)), R=128.
+  img.Image _sauvolaBinarize(img.Image gray,
+      {int windowSize = 31, double k = 0.25, double r = 128.0}) {
+    final w = gray.width;
+    final h = gray.height;
+    final stride = w + 1;
+
+    // Images intégrales (1-indexées) : somme et somme des carrés
+    final iSum   = Float64List(stride * (h + 1));
+    final iSumSq = Float64List(stride * (h + 1));
+
+    for (int y = 1; y <= h; y++) {
+      for (int x = 1; x <= w; x++) {
+        final v = gray.getPixel(x - 1, y - 1).r.toDouble();
+        iSum[y * stride + x]   = v      + iSum[(y-1)*stride+x] + iSum[y*stride+x-1] - iSum[(y-1)*stride+x-1];
+        iSumSq[y * stride + x] = v * v  + iSumSq[(y-1)*stride+x] + iSumSq[y*stride+x-1] - iSumSq[(y-1)*stride+x-1];
+      }
+    }
+
+    final half = windowSize ~/ 2;
+    final out = img.Image(width: w, height: h);
+
+    for (int y = 0; y < h; y++) {
+      final y1 = max(0, y - half);
+      final y2 = min(h - 1, y + half);
+      for (int x = 0; x < w; x++) {
+        final x1 = max(0, x - half);
+        final x2 = min(w - 1, x + half);
+        final count = (x2 - x1 + 1) * (y2 - y1 + 1);
+
+        final s  = iSum[(y2+1)*stride+(x2+1)]   - iSum[y1*stride+(x2+1)]   - iSum[(y2+1)*stride+x1]   + iSum[y1*stride+x1];
+        final sq = iSumSq[(y2+1)*stride+(x2+1)] - iSumSq[y1*stride+(x2+1)] - iSumSq[(y2+1)*stride+x1] + iSumSq[y1*stride+x1];
+
+        final mean   = s / count;
+        final stdDev = sqrt(max(0.0, sq / count - mean * mean));
+        final threshold = mean * (1.0 + k * (stdDev / r - 1.0));
+
+        final v = gray.getPixel(x, y).r.toDouble() <= threshold ? 0 : 255;
+        out.setPixelRgb(x, y, v, v, v);
+      }
+    }
+    return out;
   }
 
   // Passe 1 : récupère les bounding boxes de niveau 2 (blocs Tesseract)
