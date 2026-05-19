@@ -214,24 +214,25 @@ class OCRService {
     return count > 0 && (sum ~/ count) < 127;
   }
 
-  // Fusionne deux listes de Rect en écartant les doublons (IoU > 0.3)
+  // Fusionne deux listes de Rect en écartant les doublons par test de centre.
+  // Un candidat est doublon si le centre de l'un tombe dans l'autre (bidirectionnel),
+  // ce qui est insensible aux différences de taille entre les deux passes.
   List<Rect> _mergeRects(List<Rect> base, List<Rect> additional) {
     final result = List<Rect>.from(base);
-    for (final newRect in additional) {
-      final overlap = base.any((r) => _iou(r, newRect) > 0.3);
-      if (!overlap) result.add(newRect);
+    for (final candidate in additional) {
+      final isDuplicate = base.any((r) => _centersOverlap(r, candidate));
+      if (!isDuplicate) result.add(candidate);
     }
     return result;
   }
 
-  double _iou(Rect a, Rect b) {
-    final il = max(a.left, b.left);
-    final it = max(a.top, b.top);
-    final ir = min(a.right, b.right);
-    final ib = min(a.bottom, b.bottom);
-    if (ir <= il || ib <= it) return 0;
-    final inter = (ir - il) * (ib - it);
-    return inter / (a.width * a.height + b.width * b.height - inter);
+  bool _centersOverlap(Rect a, Rect b) {
+    final bCx = b.left + b.width / 2;
+    final bCy = b.top + b.height / 2;
+    if (bCx >= a.left && bCx <= a.right && bCy >= a.top && bCy <= a.bottom) return true;
+    final aCx = a.left + a.width / 2;
+    final aCy = a.top + a.height / 2;
+    return aCx >= b.left && aCx <= b.right && aCy >= b.top && aCy <= b.bottom;
   }
 
   // Niveaux de gris + normalisation pour améliorer le contraste des scans

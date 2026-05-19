@@ -24,12 +24,18 @@ const double _phaseWrite = 0.10;
 // Reçoit les données brutes d'une page, génère et retourne les bytes PDF.
 const _rtlLanguages = {'ar', 'he', 'fa', 'ur'};
 
-// Taille de police proportionnelle à la surface du bloc original.
-// Cible : le texte traduit couvre la même aire que le texte source.
+// Recherche binaire du plus grand corps de texte tel que le texte
+// tient dans bWidth × bHeight sans déborder.
+// Roboto : largeur moy. ≈ fs×0.50, interligne ≈ fs×1.30.
 double _estimateFontSize(double bWidth, double bHeight, int charCount) {
   if (charCount == 0) return 10.0;
-  final fs = sqrt(bWidth * bHeight / (charCount * 0.7));
-  return fs.clamp(7.0, 16.0);
+  double lo = 4.0, hi = 20.0;
+  for (int i = 0; i < 12; i++) {
+    final mid = (lo + hi) / 2;
+    final lines = (charCount * mid * 0.50 / bWidth).ceil();
+    if (lines * mid * 1.30 <= bHeight) lo = mid; else hi = mid;
+  }
+  return lo;
 }
 
 Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
@@ -63,13 +69,18 @@ Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
           return pw.Positioned(
             left: b['left'] as double,
             top: b['top'] as double,
-            child: pw.Container(
-              width: bWidth,
-              color: PdfColors.white,
-              child: pw.Text(
-                text,
-                style: pw.TextStyle(fontSize: fontSize, color: PdfColors.black, font: font),
-                textAlign: textAlign,
+            child: pw.ClipRect(
+              child: pw.SizedBox(
+                width: bWidth,
+                height: bHeight,
+                child: pw.Container(
+                  color: PdfColors.white,
+                  child: pw.Text(
+                    text,
+                    style: pw.TextStyle(fontSize: fontSize, color: PdfColors.black, font: font),
+                    textAlign: textAlign,
+                  ),
+                ),
               ),
             ),
           );
