@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' show Rect;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/services.dart' show rootBundle;
@@ -201,16 +202,28 @@ class PDFProcessingService {
         final ptHeight = decoded.height * 72.0 / _renderDpi;
         final pixelToPoint = 72.0 / _renderDpi;
 
-        // Étape 2 — OCR (progress émis depuis l'intérieur de extractTextBlocks)
-        final textBlocks = await _ocrService.extractTextBlocks(
-          imageFile, language: sourceLanguage,
-          dpi: _renderDpi,
-          onProgress: (ocrFraction, ocrStep) => _emit(onProgress, ProcessingUpdate(
+        // Étape 2 — Essai texte embarqué (PDF avec couche texte) puis OCR
+        final embedded = await _tryEmbeddedText(pdfFile, pageIndex, _renderDpi);
+        final List<OCRTextBlock> textBlocks;
+        if (embedded != null) {
+          logger.i('Page $pageIndex: texte embarqué utilisé (${embedded.length} blocs pdftotext)');
+          textBlocks = embedded;
+          await _emit(onProgress, ProcessingUpdate(
             currentPage: pageIndex, totalPages: pageCount,
-            stepName: ocrStep,
-            stepProgress: _phaseRender + ocrFraction * _phaseOCR,
-          )),
-        );
+            stepName: 'Texte embarqué extrait',
+            stepProgress: _phaseRender + _phaseOCR,
+          ));
+        } else {
+          textBlocks = await _ocrService.extractTextBlocks(
+            imageFile, language: sourceLanguage,
+            dpi: _renderDpi,
+            onProgress: (ocrFraction, ocrStep) => _emit(onProgress, ProcessingUpdate(
+              currentPage: pageIndex, totalPages: pageCount,
+              stepName: ocrStep,
+              stepProgress: _phaseRender + ocrFraction * _phaseOCR,
+            )),
+          );
+        }
         logger.i('Page $pageIndex: ${textBlocks.length} bloc(s) OCR après filtrage');
         for (int i = 0; i < textBlocks.length; i++) {
           final bb = textBlocks[i].boundingBox;
@@ -301,5 +314,61 @@ class PDFProcessingService {
         try { await File(path).delete(); } catch (_) {}
       }
     }
+  }
+
+  // Tente d'extraire le texte embarqué via pdftotext -bbox.
+  // Retourne null si la page n'a pas de couche texte utile (PDF scanné pur).
+  // Les coordonnées pdftotext sont en points PDF (72 pt = 1 inch) ; on les
+  // convertit en pixels en multipliant par (dpi / 72).
+  Future<List<OCRTextBlock>?> _tryEmbeddedText(
+      File pdfFile, int pageNumber, int dpi) async {
+    final result = await Process.run('pdftotext', [
+      '-bbox', '-f', '$pageNumber', '-l', '$pageNumber',
+      pdfFile.path, '-',
+    ]);
+    if (result.exitCode != 0) return null;
+
+    final blocks = _parsePdftotextBbox(result.stdout as String, dpi);
+    if (blocks.isEmpty) return null;
+
+    // Compter les caractères significatifs (lettres, chiffres, japonais)
+    int meaningful = 0;
+    for (final b in blocks) {
+      for (final r in b.text.runes) {
+        if ((r >= 0x30 && r <= 0x39) || (r >= 0x41 && r <= 0x5A) ||
+            (r >= 0x61 && r <= 0x7A) || (r >= 0x3040 && r <= 0x9FFF)) {
+          meaningful++;
+        }
+      }
+    }
+    // Seuil : au moins 20 caractères réels pour valider la couche texte
+    return meaningful >= 20 ? blocks : null;
+  }
+
+  List<OCRTextBlock> _parsePdftotextBbox(String html, int dpi) {
+    final scale = dpi / 72.0;
+    final blocks = <OCRTextBlock>[];
+    final blockRe = RegExp(
+      r'<block xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</block>',
+      dotAll: true,
+    );
+    final wordRe = RegExp(r'<word[^>]*>(.*?)</word>', dotAll: true);
+
+    for (final bm in blockRe.allMatches(html)) {
+      final x1 = double.parse(bm.group(1)!) * scale;
+      final y1 = double.parse(bm.group(2)!) * scale;
+      final x2 = double.parse(bm.group(3)!) * scale;
+      final y2 = double.parse(bm.group(4)!) * scale;
+      final words = wordRe.allMatches(bm.group(5)!)
+          .map((m) => m.group(1)!.trim())
+          .where((w) => w.isNotEmpty)
+          .toList();
+      if (words.isEmpty) continue;
+      blocks.add(OCRTextBlock(
+        text: words.join(' '),
+        boundingBox: Rect.fromLTRB(x1, y1, x2, y2),
+      ));
+    }
+    return blocks;
   }
 }
