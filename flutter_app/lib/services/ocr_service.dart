@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' show Rect;
+import 'package:flutter/foundation.dart' show compute;
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
@@ -37,6 +38,539 @@ Future<T> _withSimulatedProgress<T>(
     active = false;
   }
 }
+
+// ─── Fonctions top-level (isolate-safe) ───────────────────────────────────────
+
+/// Pipeline complet de prétraitement dans un isolate séparé.
+/// Retourne une Map sérialisable avec les bytes PNG traités + métadonnées.
+Map<String, dynamic> _preprocessPipeline(Uint8List srcBytes) {
+  final logs = <String>[];
+  final t0 = DateTime.now();
+  int ms() => DateTime.now().difference(t0).inMilliseconds;
+
+  final src = img.decodeImage(srcBytes);
+  if (src == null) {
+    return {
+      'processedBytes': srcBytes,
+      'skewAngle': 0.0,
+      'prepWidth': 0,
+      'prepHeight': 0,
+      'origWidth': 0,
+      'origHeight': 0,
+      'dewarpStripOffsets': <double>[],
+      'dewarpStripWidth': 1,
+      'elapsedMs': 0,
+      'logs': logs,
+    };
+  }
+
+  final origW = src.width;
+  final origH = src.height;
+  logs.add('i:Prétraitement démarré — image ${origW}×${origH} px');
+
+  var gray = img.grayscale(src);
+
+  gray = _ppSubtractBackground(gray, logs: logs);
+  logs.add('d:  correction éclairage      : ${ms()} ms');
+
+  gray = _ppMedianFilter3x3(gray);
+  logs.add('d:  filtre médian 3×3          : ${ms()} ms');
+
+  gray = img.normalize(gray, min: 0, max: 255);
+  var binary = _ppAdaptiveSauvola(gray, logs: logs);
+  logs.add('d:  binarisation Sauvola       : ${ms()} ms');
+
+  binary = _ppDespeckle(binary);
+  logs.add('d:  despeckle composantes      : ${ms()} ms');
+
+  binary = _ppDilate(binary);
+  logs.add('d:  dilatation 1 px            : ${ms()} ms');
+
+  final deskewData = _ppDeskew(binary, logs: logs);
+  binary = deskewData.image;
+  final skewAngle = deskewData.angle;
+  final prepW = deskewData.prepW;
+  final prepH = deskewData.prepH;
+  logs.add('d:  deskew (${skewAngle.toStringAsFixed(2)}°)              : ${ms()} ms');
+
+  final dewarpData = _ppDewarp(binary, logs: logs);
+  binary = dewarpData.image;
+  final dewarpOffsets = dewarpData.stripOffsets;
+  final dewarpStripW = dewarpData.stripW;
+  logs.add('d:  dewarp (${dewarpOffsets.isEmpty ? "aucun" : dewarpOffsets.map((o) => o.toStringAsFixed(1)).join(",")}) : ${ms()} ms');
+
+  final elapsedMs = ms();
+  logs.add('i:Prétraitement terminé — durée totale $elapsedMs ms | '
+      'deskew=${skewAngle.toStringAsFixed(2)}° | '
+      'dewarp=${dewarpOffsets.isEmpty ? "non" : "oui (${dewarpOffsets.length} bandes)"}');
+
+  return {
+    'processedBytes': Uint8List.fromList(img.encodePng(binary)),
+    'skewAngle': skewAngle,
+    'prepWidth': prepW,
+    'prepHeight': prepH,
+    'origWidth': origW,
+    'origHeight': origH,
+    'dewarpStripOffsets': dewarpOffsets,
+    'dewarpStripWidth': dewarpStripW,
+    'elapsedMs': elapsedMs,
+    'logs': logs,
+  };
+}
+
+/// Inverse les pixels d'une image PNG dans un isolate.
+Uint8List _invertImageBytes(Uint8List srcBytes) {
+  final decoded = img.decodeImage(srcBytes);
+  if (decoded == null) return srcBytes;
+  return Uint8List.fromList(img.encodePng(img.invert(decoded)));
+}
+
+/// Upscale 2× bicubique d'un crop PNG dans un isolate.
+Uint8List _upscaleCrop(Uint8List cropBytes) {
+  final decoded = img.decodeImage(cropBytes);
+  if (decoded == null) return cropBytes;
+  final upscaled = img.copyResize(
+    decoded,
+    width: decoded.width * 2,
+    height: decoded.height * 2,
+    interpolation: img.Interpolation.cubic,
+  );
+  return Uint8List.fromList(img.encodePng(upscaled));
+}
+
+// ─── Correction d'éclairage ───────────────────────────────────────────────────
+img.Image _ppSubtractBackground(img.Image gray, {List<String>? logs}) {
+  final w = gray.width;
+  final h = gray.height;
+
+  final src = Uint8List(w * h);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      src[y * w + x] = gray.getPixel(x, y).r.toInt();
+    }
+  }
+
+  const blockSize = 64;
+  final bw = (w + blockSize - 1) ~/ blockSize + 1;
+  final bh = (h + blockSize - 1) ~/ blockSize + 1;
+  final bgGrid = Float64List(bw * bh);
+  for (int i = 0; i < bgGrid.length; i++) bgGrid[i] = 255.0;
+
+  final samples = <int>[];
+  for (int by = 0; by < bh; by++) {
+    for (int bx = 0; bx < bw; bx++) {
+      final x0 = (bx * blockSize).clamp(0, w - 1);
+      final y0 = (by * blockSize).clamp(0, h - 1);
+      final x1 = min(w, x0 + blockSize);
+      final y1 = min(h, y0 + blockSize);
+      samples.clear();
+      for (int y = y0; y < y1; y += 2) {
+        for (int x = x0; x < x1; x += 2) {
+          samples.add(src[y * w + x]);
+        }
+      }
+      if (samples.isEmpty) continue;
+      samples.sort();
+      bgGrid[by * bw + bx] =
+          samples[(samples.length * 0.90).floor().clamp(0, samples.length - 1)]
+              .toDouble();
+    }
+  }
+
+  final out = img.Image(width: w, height: h, numChannels: 3);
+  for (int y = 0; y < h; y++) {
+    final byf = y / blockSize;
+    final by0 = byf.floor().clamp(0, bh - 1);
+    final by1 = (by0 + 1).clamp(0, bh - 1);
+    final ty = byf - by0;
+    for (int x = 0; x < w; x++) {
+      final bxf = x / blockSize;
+      final bx0 = bxf.floor().clamp(0, bw - 1);
+      final bx1 = (bx0 + 1).clamp(0, bw - 1);
+      final tx = bxf - bx0;
+      final bg = bgGrid[by0 * bw + bx0] * (1 - tx) * (1 - ty) +
+          bgGrid[by0 * bw + bx1] * tx * (1 - ty) +
+          bgGrid[by1 * bw + bx0] * (1 - tx) * ty +
+          bgGrid[by1 * bw + bx1] * tx * ty;
+      final pix = src[y * w + x];
+      final norm = bg > 20 ? ((pix / bg) * 255.0).round().clamp(0, 255) : pix;
+      out.setPixelRgb(x, y, norm, norm, norm);
+    }
+  }
+  return out;
+}
+
+// ─── Filtre médian 3×3 ────────────────────────────────────────────────────────
+img.Image _ppMedianFilter3x3(img.Image gray) {
+  final w = gray.width;
+  final h = gray.height;
+
+  final src = Uint8List(w * h);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      src[y * w + x] = gray.getPixel(x, y).r.toInt();
+    }
+  }
+
+  final out = img.Image(width: w, height: h, numChannels: 3);
+  final win = List<int>.filled(9, 0);
+
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+        final v = src[y * w + x];
+        out.setPixelRgb(x, y, v, v, v);
+        continue;
+      }
+      int k = 0;
+      for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+          win[k++] = src[(y + dy) * w + (x + dx)];
+        }
+      }
+      win.sort();
+      final med = win[4];
+      out.setPixelRgb(x, y, med, med, med);
+    }
+  }
+  return out;
+}
+
+// ─── Binarisation adaptative Sauvola ──────────────────────────────────────────
+img.Image _ppAdaptiveSauvola(img.Image gray, {List<String>? logs}) {
+  double kLo = 0.02, kHi = 0.80, k = 0.25;
+  img.Image result = _ppSauvolaBinarize(gray, k: k);
+
+  for (int iter = 0; iter < 4; iter++) {
+    final density = _ppBlackPixelDensity(result);
+    logs?.add('d:Sauvola iter=$iter k=${k.toStringAsFixed(3)} densité=${(density * 100).toStringAsFixed(1)}%');
+    if (density >= 0.05 && density <= 0.30) break;
+    if (density < 0.05) { kHi = k; } else { kLo = k; }
+    k = (kLo + kHi) / 2.0;
+    result = _ppSauvolaBinarize(gray, k: k);
+  }
+  return result;
+}
+
+double _ppBlackPixelDensity(img.Image binary) {
+  const step = 4;
+  int blacks = 0, count = 0;
+  for (int y = 0; y < binary.height; y += step) {
+    for (int x = 0; x < binary.width; x += step) {
+      if (binary.getPixel(x, y).r.toInt() == 0) blacks++;
+      count++;
+    }
+  }
+  return count > 0 ? blacks / count : 0.0;
+}
+
+img.Image _ppSauvolaBinarize(img.Image gray,
+    {int windowSize = 97, double k = 0.25, double r = 128.0}) {
+  final w = gray.width;
+  final h = gray.height;
+  final stride = w + 1;
+
+  final iSum   = Float64List(stride * (h + 1));
+  final iSumSq = Float64List(stride * (h + 1));
+
+  for (int y = 1; y <= h; y++) {
+    for (int x = 1; x <= w; x++) {
+      final v = gray.getPixel(x - 1, y - 1).r.toDouble();
+      iSum[y * stride + x]   = v     + iSum[(y-1)*stride+x] + iSum[y*stride+x-1] - iSum[(y-1)*stride+x-1];
+      iSumSq[y * stride + x] = v * v + iSumSq[(y-1)*stride+x] + iSumSq[y*stride+x-1] - iSumSq[(y-1)*stride+x-1];
+    }
+  }
+
+  final half = windowSize ~/ 2;
+  final out = img.Image(width: w, height: h, numChannels: 3);
+
+  for (int y = 0; y < h; y++) {
+    final y1 = max(0, y - half);
+    final y2 = min(h - 1, y + half);
+    for (int x = 0; x < w; x++) {
+      final x1 = max(0, x - half);
+      final x2 = min(w - 1, x + half);
+      final count = (x2 - x1 + 1) * (y2 - y1 + 1);
+
+      final s  = iSum[(y2+1)*stride+(x2+1)]   - iSum[y1*stride+(x2+1)]   - iSum[(y2+1)*stride+x1]   + iSum[y1*stride+x1];
+      final sq = iSumSq[(y2+1)*stride+(x2+1)] - iSumSq[y1*stride+(x2+1)] - iSumSq[(y2+1)*stride+x1] + iSumSq[y1*stride+x1];
+
+      final mean   = s / count;
+      final stdDev = sqrt(max(0.0, sq / count - mean * mean));
+      final threshold = mean * (1.0 + k * (stdDev / r - 1.0));
+
+      final v = gray.getPixel(x, y).r.toDouble() <= threshold ? 0 : 255;
+      out.setPixelRgb(x, y, v, v, v);
+    }
+  }
+  return out;
+}
+
+// ─── Nettoyage par composantes connexes ───────────────────────────────────────
+img.Image _ppDespeckle(img.Image binary, {int minSize = 10}) {
+  final w = binary.width;
+  final h = binary.height;
+
+  final src = Uint8List(w * h);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      src[y * w + x] = binary.getPixel(x, y).r.toInt();
+    }
+  }
+
+  final visited  = Uint8List(w * h);
+  final result   = Uint8List.fromList(src);
+  final stack    = <int>[];
+  final component = <int>[];
+
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      final idx = y * w + x;
+      if (src[idx] != 0 || visited[idx] != 0) continue;
+
+      stack.clear();
+      component.clear();
+      stack.add(idx);
+      visited[idx] = 1;
+      var large = false;
+
+      while (stack.isNotEmpty) {
+        final cur = stack.removeLast();
+        if (!large) component.add(cur);
+        if (component.length >= minSize) large = true;
+
+        final cx = cur % w;
+        final cy = cur ~/ w;
+        if (cx > 0) {
+          final n = cur - 1;
+          if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
+        }
+        if (cx < w - 1) {
+          final n = cur + 1;
+          if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
+        }
+        if (cy > 0) {
+          final n = cur - w;
+          if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
+        }
+        if (cy < h - 1) {
+          final n = cur + w;
+          if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
+        }
+      }
+
+      if (!large) {
+        for (final i in component) result[i] = 255;
+      }
+    }
+  }
+
+  final out = img.Image(width: w, height: h, numChannels: 3);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      final v = result[y * w + x];
+      out.setPixelRgb(x, y, v, v, v);
+    }
+  }
+  return out;
+}
+
+// ─── Dilatation morphologique 1 px ────────────────────────────────────────────
+img.Image _ppDilate(img.Image binary) {
+  final w = binary.width;
+  final h = binary.height;
+
+  final src = Uint8List(w * h);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      src[y * w + x] = binary.getPixel(x, y).r.toInt();
+    }
+  }
+
+  final out = img.Image(width: w, height: h, numChannels: 3);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      bool anyBlack = false;
+      for (int dy = -1; dy <= 1 && !anyBlack; dy++) {
+        for (int dx = -1; dx <= 1 && !anyBlack; dx++) {
+          final sy = (y + dy).clamp(0, h - 1);
+          final sx = (x + dx).clamp(0, w - 1);
+          if (src[sy * w + sx] == 0) anyBlack = true;
+        }
+      }
+      final v = anyBlack ? 0 : 255;
+      out.setPixelRgb(x, y, v, v, v);
+    }
+  }
+  return out;
+}
+
+// ─── Correction d'inclinaison (deskew) ────────────────────────────────────────
+({img.Image image, double angle, int prepW, int prepH}) _ppDeskew(
+    img.Image binary, {List<String>? logs}) {
+  const sampleDiv = 6;
+  final small = img.copyResize(
+    binary,
+    width: binary.width ~/ sampleDiv,
+    height: binary.height ~/ sampleDiv,
+    interpolation: img.Interpolation.average,
+  );
+
+  double bestAngle = 0.0;
+  double bestScore = -1.0;
+  for (double a = -5.0; a <= 5.0; a += 0.3) {
+    final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
+    if (score > bestScore) { bestScore = score; bestAngle = a; }
+  }
+  for (double a = bestAngle - 0.5; a <= bestAngle + 0.5; a += 0.05) {
+    final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
+    if (score > bestScore) { bestScore = score; bestAngle = a; }
+  }
+
+  logs?.add('d:Deskew: angle optimal = ${bestAngle.toStringAsFixed(2)}° '
+      '(variance=${bestScore.toStringAsFixed(0)})');
+  if (bestAngle.abs() < 0.1) {
+    logs?.add('i:Deskew: inclinaison négligeable (< 0.1°), pas de correction');
+    return (image: binary, angle: 0.0, prepW: binary.width, prepH: binary.height);
+  }
+
+  binary.backgroundColor = img.ColorRgb8(255, 255, 255);
+  final deskewed = img.copyRotate(binary, angle: bestAngle,
+      interpolation: img.Interpolation.linear);
+  binary.backgroundColor = null;
+
+  logs?.add('i:Deskew: correction ${bestAngle > 0 ? "+" : ""}${bestAngle.toStringAsFixed(2)}° '
+      '→ image ${deskewed.width}×${deskewed.height} px '
+      '(était ${binary.width}×${binary.height})');
+  return (image: deskewed, angle: bestAngle, prepW: deskewed.width, prepH: deskewed.height);
+}
+
+double _ppProjectionVariance(img.Image binary) {
+  final w = binary.width;
+  final h = binary.height;
+  var sum = 0;
+  var sumSq = 0;
+  for (int y = 0; y < h; y++) {
+    var row = 0;
+    for (int x = 0; x < w; x++) {
+      if (binary.getPixel(x, y).r.toInt() < 128) row++;
+    }
+    sum += row;
+    sumSq += row * row;
+  }
+  final mean = sum / h;
+  return sumSq / h - mean * mean;
+}
+
+// ─── Correction de déformation de page (dewarp) ───────────────────────────────
+({img.Image image, List<double> stripOffsets, int stripW}) _ppDewarp(
+    img.Image binary, {List<String>? logs}) {
+  const strips = 16;
+  final w = binary.width;
+  final h = binary.height;
+  final sw = w ~/ strips;
+  if (sw == 0) return (image: binary, stripOffsets: const [], stripW: 1);
+
+  final src = Uint8List(w * h);
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      src[y * w + x] = binary.getPixel(x, y).r.toInt();
+    }
+  }
+
+  final stripPeaks = <List<int>>[];
+  for (int s = 0; s < strips; s++) {
+    final x0 = s * sw;
+    final x1 = (s == strips - 1) ? w : x0 + sw;
+    final proj = List<int>.filled(h, 0);
+    for (int y = 0; y < h; y++) {
+      for (int x = x0; x < x1; x++) {
+        if (src[y * w + x] == 0) proj[y]++;
+      }
+    }
+    final smooth = List<int>.filled(h, 0);
+    for (int y = 0; y < h; y++) {
+      var s2 = 0;
+      for (int dy = -2; dy <= 2; dy++) {
+        s2 += proj[(y + dy).clamp(0, h - 1)];
+      }
+      smooth[y] = s2 ~/ 5;
+    }
+    final threshold = (x1 - x0) ~/ 12;
+    stripPeaks.add(_ppFindProjectionPeaks(smooth, minValue: threshold, minDist: 60));
+  }
+
+  final refIdx = strips ~/ 2;
+  final refPeaks = stripPeaks[refIdx];
+  if (refPeaks.isEmpty) {
+    logs?.add('d:Dewarp: aucune ligne de référence, pas de correction');
+    return (image: binary, stripOffsets: const [], stripW: sw);
+  }
+
+  final stripOffsets = List<double>.filled(strips, 0.0);
+  for (int s = 0; s < strips; s++) {
+    if (s == refIdx) continue;
+    final peaks = stripPeaks[s];
+    if (peaks.isEmpty) continue;
+    final offsets = <double>[];
+    for (final refY in refPeaks) {
+      int? closest;
+      int minDist = 80;
+      for (final pk in peaks) {
+        final d = (pk - refY).abs();
+        if (d < minDist) { minDist = d; closest = pk; }
+      }
+      if (closest != null) offsets.add((refY - closest).toDouble());
+    }
+    if (offsets.isNotEmpty) {
+      offsets.sort();
+      stripOffsets[s] = offsets[offsets.length ~/ 2];
+    }
+  }
+
+  final maxOff = stripOffsets.map((o) => o.abs()).reduce(max);
+  final nonZero = stripOffsets.where((o) => o.abs() >= 1).length;
+  if (maxOff < 3) {
+    logs?.add('i:Dewarp: déformation négligeable (max=${maxOff.toStringAsFixed(1)}px), pas de correction');
+    return (image: binary, stripOffsets: const [], stripW: sw);
+  }
+  logs?.add('i:Dewarp: correction appliquée — déviation max=${maxOff.toStringAsFixed(1)}px '
+      'sur $nonZero/$strips bandes (lignes réf: ${refPeaks.length})');
+
+  final out = img.Image(width: w, height: h, numChannels: 3);
+  img.fill(out, color: img.ColorRgb8(255, 255, 255));
+
+  for (int x = 0; x < w; x++) {
+    final sf = x / sw;
+    final s0 = sf.floor().clamp(0, strips - 1);
+    final s1 = (s0 + 1).clamp(0, strips - 1);
+    final t = sf - s0;
+    final offset = (stripOffsets[s0] * (1 - t) + stripOffsets[s1] * t).round();
+    for (int y = 0; y < h; y++) {
+      final srcY = (y - offset).clamp(0, h - 1);
+      final v = src[srcY * w + x];
+      out.setPixelRgb(x, y, v, v, v);
+    }
+  }
+  return (image: out, stripOffsets: stripOffsets.toList(), stripW: sw);
+}
+
+List<int> _ppFindProjectionPeaks(List<int> proj,
+    {int minValue = 0, int minDist = 60}) {
+  final peaks = <int>[];
+  for (int i = 1; i < proj.length - 1; i++) {
+    if (proj[i] <= proj[i - 1] || proj[i] <= proj[i + 1]) continue;
+    if (proj[i] < minValue) continue;
+    if (peaks.isNotEmpty && i - peaks.last < minDist) {
+      if (proj[i] > proj[peaks.last]) peaks.removeLast();
+      else continue;
+    }
+    peaks.add(i);
+  }
+  return peaks;
+}
+
+// ─── OCRService ───────────────────────────────────────────────────────────────
 
 class OCRService {
   final logger = AppLogger.build();
@@ -100,12 +634,13 @@ class OCRService {
 
       await onProgress?.call(0.42, 'Inversion de l\'image…');
       final srcBytes = await prep.file.readAsBytes();
+      // Décode une fois ici pour réutilisation dans la boucle de crop
       final srcDecoded = img.decodeImage(srcBytes);
       if (srcDecoded != null) {
-        final inverted = img.invert(img.copyCrop(srcDecoded,
-            x: 0, y: 0, width: srcDecoded.width, height: srcDecoded.height));
+        // Inversion dans un isolate pour ne pas bloquer l'UI
+        final invBytes = await compute(_invertImageBytes, srcBytes);
         final invPath = p.join(tempDir.path, 'inv_${DateTime.now().millisecondsSinceEpoch}.png');
-        await File(invPath).writeAsBytes(img.encodePng(inverted));
+        await File(invPath).writeAsBytes(invBytes);
         ownTempFiles.add(invPath);
         await onProgress?.call(0.44, 'Détection des zones sombres…');
         final invRects = await _withSimulatedProgress(
@@ -168,19 +703,15 @@ class OCRService {
             : crop.image;
         if (dark) logger.d('  région[$ri]: fond sombre → inversion appliquée');
 
-        // Upscale crop 2× (bicubic) pour améliorer l'OCR sur les petits caractères
-        final upscaled = img.copyResize(
-          cropImage,
-          width: cropImage.width * 2,
-          height: cropImage.height * 2,
-          interpolation: img.Interpolation.cubic,
-        );
+        // Upscale 2× (bicubique) dans un isolate pour ne pas bloquer l'UI
+        final cropBytes = Uint8List.fromList(img.encodePng(cropImage));
+        final upscaledBytes = await compute(_upscaleCrop, cropBytes);
 
         final cropPath = p.join(
           tempDir.path,
           'crop_${rect.left.toInt()}_${rect.top.toInt()}_${DateTime.now().microsecondsSinceEpoch}.png',
         );
-        await File(cropPath).writeAsBytes(img.encodePng(upscaled));
+        await File(cropPath).writeAsBytes(upscaledBytes);
         ownTempFiles.add(cropPath);
 
         final blocks = await _withSimulatedProgress(
@@ -197,7 +728,6 @@ class OCRService {
       await onProgress?.call(1.00, 'Extraction terminée');
       logger.i('Passe 2 — total blocs: ${result.length}');
 
-      // Remapper les bboxes depuis l'espace prétraité (deskew+dewarp) vers l'espace original
       if (prep.hasTransform) {
         return result.map((b) => OCRTextBlock(
           text: b.text,
@@ -218,65 +748,28 @@ class OCRService {
       File imageFile, Directory tempDir, int dpi,
       {Future<void> Function(double, String)? onProgress}) async {
     final bytes = await imageFile.readAsBytes();
-    final src = img.decodeImage(bytes);
-    if (src == null) {
-      return _PrepResult(
-        file: imageFile, skewAngle: 0.0,
-        prepWidth: 0, prepHeight: 0, origWidth: 0, origHeight: 0,
-        dewarpStripOffsets: const [], dewarpStripWidth: 1,
-      );
+
+    // Pipeline CPU-intensif exécuté dans un isolate via compute()
+    final result = await _withSimulatedProgress(
+      compute(_preprocessPipeline, bytes),
+      onProgress: onProgress,
+      start: 0.00, end: 0.98,
+      label: 'Prétraitement de l\'image…',
+      expectedMs: 28000,
+    );
+
+    // Relire les logs produits dans l'isolate
+    for (final msg in (result['logs'] as List).cast<String>()) {
+      if (msg.startsWith('d:')) logger.d(msg.substring(2));
+      else if (msg.startsWith('i:')) logger.i(msg.substring(2));
+      else if (msg.startsWith('w:')) logger.w(msg.substring(2));
+      else logger.i(msg);
     }
 
-    final origW = src.width;
-    final origH = src.height;
-    final t0 = DateTime.now();
-    int ms() => DateTime.now().difference(t0).inMilliseconds;
-    logger.i('Prétraitement démarré — image ${origW}×${origH} px');
-
-    var gray = img.grayscale(src);
-
-    await onProgress?.call(0.00, 'Correction d\'éclairage…');
-    gray = _subtractBackground(gray);
-    logger.d('  correction éclairage      : ${ms()} ms');
-
-    await onProgress?.call(0.15, 'Filtre médian…');
-    gray = _medianFilter3x3(gray);
-    logger.d('  filtre médian 3×3          : ${ms()} ms');
-
-    await onProgress?.call(0.25, 'Binarisation adaptative…');
-    gray = img.normalize(gray, min: 0, max: 255);
-    var binary = _adaptiveSauvola(gray);
-    logger.d('  binarisation Sauvola       : ${ms()} ms');
-
-    await onProgress?.call(0.60, 'Nettoyage des artefacts…');
-    binary = _despeckle(binary);
-    logger.d('  despeckle composantes      : ${ms()} ms');
-
-    await onProgress?.call(0.72, 'Épaississement des traits…');
-    binary = _dilate(binary);
-    logger.d('  dilatation 1 px            : ${ms()} ms');
-
-    await onProgress?.call(0.82, 'Correction d\'inclinaison…');
-    final deskewData = _deskew(binary);
-    binary = deskewData.image;
-    final skewAngle = deskewData.angle;
-    final prepW = deskewData.prepW;
-    final prepH = deskewData.prepH;
-    logger.d('  deskew (${skewAngle.toStringAsFixed(2)}°)              : ${ms()} ms');
-
-    await onProgress?.call(0.92, 'Correction de déformation…');
-    final dewarpData = _dewarp(binary);
-    binary = dewarpData.image;
-    final dewarpOffsets = dewarpData.stripOffsets;
-    final dewarpStripW = dewarpData.stripW;
-    logger.d('  dewarp (${dewarpOffsets.isEmpty ? "aucun" : "${dewarpOffsets.map((o) => o.toStringAsFixed(1)).join(",")}"}) : ${ms()} ms');
-
     await onProgress?.call(0.98, 'Sauvegarde image prétraitée…');
+    final processedBytes = result['processedBytes'] as Uint8List;
     final outPath = p.join(tempDir.path, 'prep_${DateTime.now().millisecondsSinceEpoch}.png');
-    await File(outPath).writeAsBytes(img.encodePng(binary));
-    logger.i('Prétraitement terminé — durée totale ${ms()} ms | '
-        'deskew=${skewAngle.toStringAsFixed(2)}° | '
-        'dewarp=${dewarpOffsets.isEmpty ? "non" : "oui (${dewarpOffsets.length} bandes)"}');
+    await File(outPath).writeAsBytes(processedBytes);
 
     final debugDir = AppLogger.debugDir;
     if (debugDir != null) {
@@ -287,411 +780,23 @@ class OCRService {
 
     return _PrepResult(
       file: File(outPath),
-      skewAngle: skewAngle,
-      prepWidth: prepW,
-      prepHeight: prepH,
-      origWidth: origW,
-      origHeight: origH,
-      dewarpStripOffsets: dewarpOffsets,
-      dewarpStripWidth: dewarpStripW,
+      skewAngle: result['skewAngle'] as double,
+      prepWidth: result['prepWidth'] as int,
+      prepHeight: result['prepHeight'] as int,
+      origWidth: result['origWidth'] as int,
+      origHeight: result['origHeight'] as int,
+      dewarpStripOffsets: (result['dewarpStripOffsets'] as List).cast<double>(),
+      dewarpStripWidth: result['dewarpStripWidth'] as int,
     );
-  }
-
-  // ─── Correction d'éclairage ───────────────────────────────────────────────
-  // Estime le fond (90e percentile par bloc 64×64) et normalise chaque pixel
-  // pour neutraliser les gradients d'éclairage (ombre de reliure, etc.).
-  img.Image _subtractBackground(img.Image gray) {
-    final w = gray.width;
-    final h = gray.height;
-
-    final src = Uint8List(w * h);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        src[y * w + x] = gray.getPixel(x, y).r.toInt();
-      }
-    }
-
-    const blockSize = 64;
-    final bw = (w + blockSize - 1) ~/ blockSize + 1;
-    final bh = (h + blockSize - 1) ~/ blockSize + 1;
-    final bgGrid = Float64List(bw * bh);
-    for (int i = 0; i < bgGrid.length; i++) bgGrid[i] = 255.0;
-
-    final samples = <int>[];
-    for (int by = 0; by < bh; by++) {
-      for (int bx = 0; bx < bw; bx++) {
-        final x0 = (bx * blockSize).clamp(0, w - 1);
-        final y0 = (by * blockSize).clamp(0, h - 1);
-        final x1 = min(w, x0 + blockSize);
-        final y1 = min(h, y0 + blockSize);
-        samples.clear();
-        for (int y = y0; y < y1; y += 2) {
-          for (int x = x0; x < x1; x += 2) {
-            samples.add(src[y * w + x]);
-          }
-        }
-        if (samples.isEmpty) continue;
-        samples.sort();
-        bgGrid[by * bw + bx] =
-            samples[(samples.length * 0.90).floor().clamp(0, samples.length - 1)]
-                .toDouble();
-      }
-    }
-
-    final out = img.Image(width: w, height: h, numChannels: 3);
-    for (int y = 0; y < h; y++) {
-      final byf = y / blockSize;
-      final by0 = byf.floor().clamp(0, bh - 1);
-      final by1 = (by0 + 1).clamp(0, bh - 1);
-      final ty = byf - by0;
-      for (int x = 0; x < w; x++) {
-        final bxf = x / blockSize;
-        final bx0 = bxf.floor().clamp(0, bw - 1);
-        final bx1 = (bx0 + 1).clamp(0, bw - 1);
-        final tx = bxf - bx0;
-        final bg = bgGrid[by0 * bw + bx0] * (1 - tx) * (1 - ty) +
-            bgGrid[by0 * bw + bx1] * tx * (1 - ty) +
-            bgGrid[by1 * bw + bx0] * (1 - tx) * ty +
-            bgGrid[by1 * bw + bx1] * tx * ty;
-        final pix = src[y * w + x];
-        final norm = bg > 20 ? ((pix / bg) * 255.0).round().clamp(0, 255) : pix;
-        out.setPixelRgb(x, y, norm, norm, norm);
-      }
-    }
-    return out;
-  }
-
-  // ─── Filtre médian 3×3 ────────────────────────────────────────────────────
-  // Supprime le bruit sel-et-poivre sans flouter les contours, contrairement
-  // au gaussien qui détruirait les traits fins.
-  img.Image _medianFilter3x3(img.Image gray) {
-    final w = gray.width;
-    final h = gray.height;
-
-    final src = Uint8List(w * h);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        src[y * w + x] = gray.getPixel(x, y).r.toInt();
-      }
-    }
-
-    final out = img.Image(width: w, height: h, numChannels: 3);
-    final win = List<int>.filled(9, 0);
-
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
-          final v = src[y * w + x];
-          out.setPixelRgb(x, y, v, v, v);
-          continue;
-        }
-        int k = 0;
-        for (int dy = -1; dy <= 1; dy++) {
-          for (int dx = -1; dx <= 1; dx++) {
-            win[k++] = src[(y + dy) * w + (x + dx)];
-          }
-        }
-        win.sort();
-        final med = win[4];
-        out.setPixelRgb(x, y, med, med, med);
-      }
-    }
-    return out;
-  }
-
-  // ─── Nettoyage par composantes connexes ───────────────────────────────────
-  // Supprime les îlots de pixels noirs inférieurs à minSize px² (grain, bruit
-  // résiduel après binarisation). Les caractères les plus petits font ~50 px²
-  // à 600 DPI, donc minSize=10 est conservateur.
-  img.Image _despeckle(img.Image binary, {int minSize = 10}) {
-    final w = binary.width;
-    final h = binary.height;
-
-    final src = Uint8List(w * h);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        src[y * w + x] = binary.getPixel(x, y).r.toInt();
-      }
-    }
-
-    final visited = Uint8List(w * h);
-    final result  = Uint8List.fromList(src);
-    final stack   = <int>[];
-    final component = <int>[];
-
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        final idx = y * w + x;
-        if (src[idx] != 0 || visited[idx] != 0) continue;
-
-        stack.clear();
-        component.clear();
-        stack.add(idx);
-        visited[idx] = 1;
-        var large = false;
-
-        while (stack.isNotEmpty) {
-          final cur = stack.removeLast();
-          if (!large) component.add(cur);
-          if (component.length >= minSize) large = true;
-
-          final cx = cur % w;
-          final cy = cur ~/ w;
-          if (cx > 0) {
-            final n = cur - 1;
-            if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
-          }
-          if (cx < w - 1) {
-            final n = cur + 1;
-            if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
-          }
-          if (cy > 0) {
-            final n = cur - w;
-            if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
-          }
-          if (cy < h - 1) {
-            final n = cur + w;
-            if (src[n] == 0 && visited[n] == 0) { visited[n] = 1; stack.add(n); }
-          }
-        }
-
-        if (!large) {
-          for (final i in component) result[i] = 255;
-        }
-      }
-    }
-
-    final out = img.Image(width: w, height: h, numChannels: 3);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        final v = result[y * w + x];
-        out.setPixelRgb(x, y, v, v, v);
-      }
-    }
-    return out;
-  }
-
-  // ─── Dilatation morphologique 1 px ────────────────────────────────────────
-  // Épaissit les traits fins après binarisation pour combler les micro-coupures
-  // dans les caractères. Sans érosion préalable (contrairement à l'ouverture),
-  // le despeckle précédent ayant déjà éliminé le grain.
-  img.Image _dilate(img.Image binary) {
-    final w = binary.width;
-    final h = binary.height;
-
-    final src = Uint8List(w * h);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        src[y * w + x] = binary.getPixel(x, y).r.toInt();
-      }
-    }
-
-    final out = img.Image(width: w, height: h, numChannels: 3);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        bool anyBlack = false;
-        for (int dy = -1; dy <= 1 && !anyBlack; dy++) {
-          for (int dx = -1; dx <= 1 && !anyBlack; dx++) {
-            final sy = (y + dy).clamp(0, h - 1);
-            final sx = (x + dx).clamp(0, w - 1);
-            if (src[sy * w + sx] == 0) anyBlack = true;
-          }
-        }
-        final v = anyBlack ? 0 : 255;
-        out.setPixelRgb(x, y, v, v, v);
-      }
-    }
-    return out;
-  }
-
-  // ─── Correction d'inclinaison (deskew) ────────────────────────────────────
-  // Profil de projection : cherche l'angle (−5° … +5°) qui maximise la variance
-  // des projections horizontales (lignes de texte bien horizontales → pics nets).
-  // Travaille sur image réduite (1/6) pour la recherche, puis applique au plein.
-  ({img.Image image, double angle, int prepW, int prepH}) _deskew(img.Image binary) {
-    const sampleDiv = 6;
-    final small = img.copyResize(
-      binary,
-      width: binary.width ~/ sampleDiv,
-      height: binary.height ~/ sampleDiv,
-      interpolation: img.Interpolation.average,
-    );
-
-    // Recherche grossière
-    double bestAngle = 0.0;
-    double bestScore = -1.0;
-    for (double a = -5.0; a <= 5.0; a += 0.3) {
-      final score = _projectionVariance(img.copyRotate(small, angle: a));
-      if (score > bestScore) { bestScore = score; bestAngle = a; }
-    }
-    // Affinage
-    for (double a = bestAngle - 0.5; a <= bestAngle + 0.5; a += 0.05) {
-      final score = _projectionVariance(img.copyRotate(small, angle: a));
-      if (score > bestScore) { bestScore = score; bestAngle = a; }
-    }
-
-    logger.d('Deskew: angle optimal = ${bestAngle.toStringAsFixed(2)}° '
-        '(variance=${bestScore.toStringAsFixed(0)})');
-    if (bestAngle.abs() < 0.1) {
-      logger.i('Deskew: inclinaison négligeable (< 0.1°), pas de correction');
-      return (image: binary, angle: 0.0, prepW: binary.width, prepH: binary.height);
-    }
-
-    binary.backgroundColor = img.ColorRgb8(255, 255, 255);
-    final deskewed = img.copyRotate(binary, angle: bestAngle,
-        interpolation: img.Interpolation.linear);
-    binary.backgroundColor = null;
-
-    logger.i('Deskew: correction ${bestAngle > 0 ? "+" : ""}${bestAngle.toStringAsFixed(2)}° '
-        '→ image ${deskewed.width}×${deskewed.height} px '
-        '(était ${binary.width}×${binary.height})');
-    return (image: deskewed, angle: bestAngle, prepW: deskewed.width, prepH: deskewed.height);
-  }
-
-  double _projectionVariance(img.Image binary) {
-    final w = binary.width;
-    final h = binary.height;
-    var sum = 0;
-    var sumSq = 0;
-    for (int y = 0; y < h; y++) {
-      var row = 0;
-      for (int x = 0; x < w; x++) {
-        if (binary.getPixel(x, y).r.toInt() < 128) row++;
-      }
-      sum += row;
-      sumSq += row * row;
-    }
-    final mean = sum / h;
-    return sumSq / h - mean * mean;
-  }
-
-  // ─── Correction de déformation de page (dewarp) ───────────────────────────
-  // Détecte la courbure des lignes de texte en comparant leur position verticale
-  // dans 16 bandes verticales. Applique un décalage par colonne (bilinéaire)
-  // pour redresser la courbure. Pas de correction si l'écart max < 3 px.
-  ({img.Image image, List<double> stripOffsets, int stripW}) _dewarp(
-      img.Image binary) {
-    const strips = 16;
-    final w = binary.width;
-    final h = binary.height;
-    final sw = w ~/ strips;
-    if (sw == 0) return (image: binary, stripOffsets: const [], stripW: 1);
-
-    final src = Uint8List(w * h);
-    for (int y = 0; y < h; y++) {
-      for (int x = 0; x < w; x++) {
-        src[y * w + x] = binary.getPixel(x, y).r.toInt();
-      }
-    }
-
-    // Projection horizontale par bande
-    final stripPeaks = <List<int>>[];
-    for (int s = 0; s < strips; s++) {
-      final x0 = s * sw;
-      final x1 = (s == strips - 1) ? w : x0 + sw;
-      final proj = List<int>.filled(h, 0);
-      for (int y = 0; y < h; y++) {
-        for (int x = x0; x < x1; x++) {
-          if (src[y * w + x] == 0) proj[y]++;
-        }
-      }
-      // Lissage (moyenne mobile 5)
-      final smooth = List<int>.filled(h, 0);
-      for (int y = 0; y < h; y++) {
-        var s2 = 0;
-        for (int dy = -2; dy <= 2; dy++) {
-          s2 += proj[(y + dy).clamp(0, h - 1)];
-        }
-        smooth[y] = s2 ~/ 5;
-      }
-      final threshold = (x1 - x0) ~/ 12;
-      stripPeaks.add(_findProjectionPeaks(smooth, minValue: threshold, minDist: 60));
-    }
-
-    // Référence = bande centrale
-    final refIdx = strips ~/ 2;
-    final refPeaks = stripPeaks[refIdx];
-    if (refPeaks.isEmpty) {
-      logger.d('Dewarp: aucune ligne de référence, pas de correction');
-      return (image: binary, stripOffsets: const [], stripW: sw);
-    }
-
-    // Calcul des décalages par bande (médiane sur les pics appariés)
-    final stripOffsets = List<double>.filled(strips, 0.0);
-    for (int s = 0; s < strips; s++) {
-      if (s == refIdx) continue;
-      final peaks = stripPeaks[s];
-      if (peaks.isEmpty) continue;
-      final offsets = <double>[];
-      for (final refY in refPeaks) {
-        int? closest;
-        int minDist = 80;
-        for (final pk in peaks) {
-          final d = (pk - refY).abs();
-          if (d < minDist) { minDist = d; closest = pk; }
-        }
-        if (closest != null) offsets.add((refY - closest).toDouble());
-      }
-      if (offsets.isNotEmpty) {
-        offsets.sort();
-        stripOffsets[s] = offsets[offsets.length ~/ 2];
-      }
-    }
-
-    final maxOff = stripOffsets.map((o) => o.abs()).reduce(max);
-    final nonZero = stripOffsets.where((o) => o.abs() >= 1).length;
-    if (maxOff < 3) {
-      logger.i('Dewarp: déformation négligeable (max=${maxOff.toStringAsFixed(1)}px), pas de correction');
-      return (image: binary, stripOffsets: const [], stripW: sw);
-    }
-    logger.i('Dewarp: correction appliquée — déviation max=${maxOff.toStringAsFixed(1)}px '
-        'sur $nonZero/$strips bandes (lignes réf: ${refPeaks.length})');
-
-    final out = img.Image(width: w, height: h, numChannels: 3);
-    img.fill(out, color: img.ColorRgb8(255, 255, 255));
-
-    for (int x = 0; x < w; x++) {
-      final sf = x / sw;
-      final s0 = sf.floor().clamp(0, strips - 1);
-      final s1 = (s0 + 1).clamp(0, strips - 1);
-      final t = sf - s0;
-      final offset = (stripOffsets[s0] * (1 - t) + stripOffsets[s1] * t).round();
-      for (int y = 0; y < h; y++) {
-        final srcY = (y - offset).clamp(0, h - 1);
-        final v = src[srcY * w + x];
-        out.setPixelRgb(x, y, v, v, v);
-      }
-    }
-    return (image: out, stripOffsets: stripOffsets.toList(), stripW: sw);
-  }
-
-  List<int> _findProjectionPeaks(List<int> proj,
-      {int minValue = 0, int minDist = 60}) {
-    final peaks = <int>[];
-    for (int i = 1; i < proj.length - 1; i++) {
-      if (proj[i] <= proj[i - 1] || proj[i] <= proj[i + 1]) continue;
-      if (proj[i] < minValue) continue;
-      if (peaks.isNotEmpty && i - peaks.last < minDist) {
-        if (proj[i] > proj[peaks.last]) peaks.removeLast();
-        else continue;
-      }
-      peaks.add(i);
-    }
-    return peaks;
   }
 
   // ─── Transformation inverse deskew + dewarp ───────────────────────────────
-  // Remapping d'un Rect depuis l'espace de l'image prétraitée (deskew+dewarp)
-  // vers l'espace de l'image originale. Conserve width/height (erreur < 0,4 %
-  // pour des angles < 5°). Nécessaire pour positionner le texte traduit sur
-  // le fond PDF non transformé.
   Rect _inverseTransformRect(Rect r, _PrepResult prep) {
     if (!prep.hasTransform) return r;
 
     double cx = r.left + r.width / 2;
     double cy = r.top + r.height / 2;
 
-    // 1. Défaire le dewarp : soustraire le décalage vertical appliqué en colonne x
     if (prep.dewarpStripOffsets.isNotEmpty) {
       final strips = prep.dewarpStripOffsets.length;
       final sw = prep.dewarpStripWidth;
@@ -704,7 +809,6 @@ class OCRService {
       cy -= offset;
     }
 
-    // 2. Défaire le deskew : rotation inverse autour du centre de l'image prétraitée
     if (prep.skewAngle.abs() >= 0.1) {
       final angle = prep.skewAngle * pi / 180.0;
       final ca = cos(angle);
@@ -713,7 +817,6 @@ class OCRService {
       final dh2 = prep.prepHeight / 2.0;
       final w2  = prep.origWidth / 2.0;
       final h2  = prep.origHeight / 2.0;
-      // Inverse de R(angle) = R(angle)^T : [[ca,sa],[-sa,ca]]
       final dx = cx - dw2;
       final dy = cy - dh2;
       cx = dx * ca + dy * sa + w2;
@@ -723,7 +826,7 @@ class OCRService {
     return Rect.fromLTWH(cx - r.width / 2, cy - r.height / 2, r.width, r.height);
   }
 
-  // ─── Binarisation Sauvola (inchangée) ─────────────────────────────────────
+  // ─── Détection de blocs ────────────────────────────────────────────────────
 
   bool _isDarkRegion(img.Image image) {
     int sum = 0;
@@ -765,77 +868,6 @@ class OCRService {
     return aCx >= b.left && aCx <= b.right && aCy >= b.top && aCy <= b.bottom;
   }
 
-  img.Image _adaptiveSauvola(img.Image gray) {
-    double kLo = 0.02, kHi = 0.80, k = 0.25;
-    img.Image result = _sauvolaBinarize(gray, k: k);
-
-    for (int iter = 0; iter < 4; iter++) {
-      final density = _blackPixelDensity(result);
-      logger.d('Sauvola iter=$iter k=${k.toStringAsFixed(3)} densité=${(density * 100).toStringAsFixed(1)}%');
-      if (density >= 0.05 && density <= 0.30) break;
-      if (density < 0.05) { kHi = k; } else { kLo = k; }
-      k = (kLo + kHi) / 2.0;
-      result = _sauvolaBinarize(gray, k: k);
-    }
-    return result;
-  }
-
-  double _blackPixelDensity(img.Image binary) {
-    const step = 4;
-    int blacks = 0, count = 0;
-    for (int y = 0; y < binary.height; y += step) {
-      for (int x = 0; x < binary.width; x += step) {
-        if (binary.getPixel(x, y).r.toInt() == 0) blacks++;
-        count++;
-      }
-    }
-    return count > 0 ? blacks / count : 0.0;
-  }
-
-  img.Image _sauvolaBinarize(img.Image gray,
-      {int windowSize = 97, double k = 0.25, double r = 128.0}) {
-    final w = gray.width;
-    final h = gray.height;
-    final stride = w + 1;
-
-    final iSum   = Float64List(stride * (h + 1));
-    final iSumSq = Float64List(stride * (h + 1));
-
-    for (int y = 1; y <= h; y++) {
-      for (int x = 1; x <= w; x++) {
-        final v = gray.getPixel(x - 1, y - 1).r.toDouble();
-        iSum[y * stride + x]   = v     + iSum[(y-1)*stride+x] + iSum[y*stride+x-1] - iSum[(y-1)*stride+x-1];
-        iSumSq[y * stride + x] = v * v + iSumSq[(y-1)*stride+x] + iSumSq[y*stride+x-1] - iSumSq[(y-1)*stride+x-1];
-      }
-    }
-
-    final half = windowSize ~/ 2;
-    final out = img.Image(width: w, height: h, numChannels: 3);
-
-    for (int y = 0; y < h; y++) {
-      final y1 = max(0, y - half);
-      final y2 = min(h - 1, y + half);
-      for (int x = 0; x < w; x++) {
-        final x1 = max(0, x - half);
-        final x2 = min(w - 1, x + half);
-        final count = (x2 - x1 + 1) * (y2 - y1 + 1);
-
-        final s  = iSum[(y2+1)*stride+(x2+1)]   - iSum[y1*stride+(x2+1)]   - iSum[(y2+1)*stride+x1]   + iSum[y1*stride+x1];
-        final sq = iSumSq[(y2+1)*stride+(x2+1)] - iSumSq[y1*stride+(x2+1)] - iSumSq[(y2+1)*stride+x1] + iSumSq[y1*stride+x1];
-
-        final mean   = s / count;
-        final stdDev = sqrt(max(0.0, sq / count - mean * mean));
-        final threshold = mean * (1.0 + k * (stdDev / r - 1.0));
-
-        final v = gray.getPixel(x, y).r.toDouble() <= threshold ? 0 : 255;
-        out.setPixelRgb(x, y, v, v, v);
-      }
-    }
-    return out;
-  }
-
-  // ─── Détection de blocs (inchangée) ────────────────────────────────────────
-
   Future<List<Rect>> _detectBlockRects(
     File imageFile, String tessLang, Directory tempDir, {int dpi = 600}
   ) async {
@@ -852,22 +884,22 @@ class OCRService {
   }) async {
     final outputBase = p.join(tempDir.path, 'det_${DateTime.now().millisecondsSinceEpoch}');
     final env = await _tessdataEnv();
-    List<String> _args(String lang) => [
+    List<String> args(String lang) => [
       imageFile.path, outputBase, '-l', lang,
       '--oem', '1', '--dpi', '$dpi', '--psm', psm,
       '-c', 'load_system_dawg=0', '-c', 'load_freq_dawg=0',
       'tsv',
     ];
 
-    logger.d('tesseract (détection psm=$psm) ${_args(tessLang).join(' ')}');
-    var result = await Process.run('tesseract', _args(tessLang), environment: env);
+    logger.d('tesseract (détection psm=$psm) ${args(tessLang).join(' ')}');
+    var result = await Process.run('tesseract', args(tessLang), environment: env);
     logger.d('tesseract détection psm=$psm exit=${result.exitCode}');
     if ((result.stderr as String).isNotEmpty) logger.d('stderr: ${result.stderr}');
 
     if (result.exitCode != 0 && tessLang.contains('+')) {
       final baseLang = tessLang.split('+').first;
       logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
-      result = await Process.run('tesseract', _args(baseLang), environment: env);
+      result = await Process.run('tesseract', args(baseLang), environment: env);
       logger.d('tesseract détection-fallback exit=${result.exitCode}');
     }
 
@@ -922,21 +954,21 @@ class OCRService {
   }) async {
     final outputBase = p.join(tempDir.path, 'ocr_${DateTime.now().millisecondsSinceEpoch}');
     final env = await _tessdataEnv();
-    List<String> _args(String lang) => [
+    List<String> args(String lang) => [
       imageFile.path, outputBase, '-l', lang,
       '--oem', '1', '--dpi', '$dpi', '--psm', psm,
       '-c', 'load_system_dawg=0', '-c', 'load_freq_dawg=0',
       'tsv',
     ];
-    logger.d('tesseract (passe2 psm=$psm dpi=$dpi scale=$scale) ${_args(tessLang).join(' ')}');
-    var result = await Process.run('tesseract', _args(tessLang), environment: env);
+    logger.d('tesseract (passe2 psm=$psm dpi=$dpi scale=$scale) ${args(tessLang).join(' ')}');
+    var result = await Process.run('tesseract', args(tessLang), environment: env);
     logger.d('tesseract passe2 exit=${result.exitCode}');
     if ((result.stderr as String).isNotEmpty) logger.d('tesseract passe2 stderr: ${result.stderr}');
 
     if (result.exitCode != 0 && tessLang.contains('+')) {
       final baseLang = tessLang.split('+').first;
       logger.w('Tesseract: "$tessLang" indisponible, fallback vers "$baseLang"');
-      result = await Process.run('tesseract', _args(baseLang), environment: env);
+      result = await Process.run('tesseract', args(baseLang), environment: env);
       logger.d('tesseract passe2-fallback exit=${result.exitCode}');
       if ((result.stderr as String).isNotEmpty) logger.d('tesseract passe2-fallback stderr: ${result.stderr}');
     }
@@ -978,7 +1010,6 @@ class OCRService {
       final pageNum  = parts[1];
       final blockNum = parts[2];
       final parNum   = parts[3];
-      // Diviser les coordonnées par scale pour ramener dans l'espace 600 DPI
       final left   = (double.tryParse(parts[6]) ?? 0) / scale + offsetX;
       final top    = (double.tryParse(parts[7]) ?? 0) / scale + offsetY;
       final width  = (double.tryParse(parts[8]) ?? 0) / scale;
