@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math';
 import 'dart:ui' show Rect;
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show compute;
@@ -20,7 +19,6 @@ const int _detectDpi = 150;
 
 const double _phaseRender = 0.10;
 const double _phaseOCR = 0.35;
-const double _phaseTranslate = 0.45;
 const double _phaseWrite = 0.10;
 
 // Fonction top-level requise par compute() : s'exécute dans un isolate séparé.
@@ -296,18 +294,20 @@ class PDFProcessingService {
           logger.d('  bloc[$i] — "${textBlocks[i].text.substring(0, textBlocks[i].text.length.clamp(0, 60))}" | bb: ${bb.left.toInt()},${bb.top.toInt()} ${bb.width.toInt()}×${bb.height.toInt()}');
         }
 
-        // Étape 3 — Traduction par bloc
+        // Étape 3 — Traduction par lot (un subprocess par page)
+        await _emit(onProgress, ProcessingUpdate(
+          currentPage: pageIndex, totalPages: pageCount,
+          stepName: 'Traduction (${textBlocks.length} bloc(s))…',
+          stepProgress: _phaseRender + _phaseOCR,
+        ));
+        final translations = await _translationService.translateBatch(
+          textBlocks.map((b) => b.text).toList(),
+          sourceLanguage,
+          targetLanguage,
+        );
         final blocks = <Map<String, dynamic>>[];
-        final blockCount = max(1, textBlocks.length);
         for (int i = 0; i < textBlocks.length; i++) {
-          await _emit(onProgress, ProcessingUpdate(
-            currentPage: pageIndex, totalPages: pageCount,
-            stepName: 'Traduction du bloc de texte (${i + 1}/$blockCount)…',
-            stepProgress: _phaseRender + _phaseOCR + _phaseTranslate * i / blockCount,
-          ));
-          final translated = await _translationService.translateText(
-            textBlocks[i].text, sourceLanguage, targetLanguage,
-          );
+          final translated = translations[i];
           if (translated.trim().isEmpty) {
             logger.w('  bloc[$i]: traduction vide, ignoré (original: "${textBlocks[i].text.substring(0, textBlocks[i].text.length.clamp(0, 40))}")');
             continue;
