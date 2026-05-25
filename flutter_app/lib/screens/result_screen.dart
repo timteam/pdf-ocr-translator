@@ -12,7 +12,7 @@ class ResultScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Translation Complete'),
+        title: const Text('Traduction terminée'),
       ),
       body: Padding(
         padding: const EdgeInsets.all(24.0),
@@ -20,19 +20,13 @@ class ResultScreen extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Success icon
             const Center(
-              child: Icon(
-                Icons.check_circle,
-                size: 96,
-                color: AppTheme.successColor,
-              ),
+              child: Icon(Icons.check_circle, size: 96, color: AppTheme.successColor),
             ),
             const SizedBox(height: 24),
 
-            // Success message
             Text(
-              'Translation Successful!',
+              'Traduction réussie !',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.bold,
@@ -42,7 +36,7 @@ class ResultScreen extends StatelessWidget {
             const SizedBox(height: 16),
 
             Text(
-              'Your PDF has been translated and is ready for download.',
+              'Le PDF traduit a été enregistré.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: AppTheme.textSecondary,
@@ -50,7 +44,6 @@ class ResultScreen extends StatelessWidget {
             ),
             const SizedBox(height: 40),
 
-            // File info card
             Card(
               child: Padding(
                 padding: const EdgeInsets.all(16.0),
@@ -58,7 +51,7 @@ class ResultScreen extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Output File',
+                      'Fichier de sortie',
                       style: Theme.of(context).textTheme.titleMedium?.copyWith(
                             fontWeight: FontWeight.w600,
                           ),
@@ -66,14 +59,11 @@ class ResultScreen extends StatelessWidget {
                     const SizedBox(height: 12),
                     Row(
                       children: [
-                        const Icon(
-                          Icons.description,
-                          color: AppTheme.primaryColor,
-                        ),
+                        const Icon(Icons.description, color: AppTheme.primaryColor),
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            outputPath ?? 'translated.pdf',
+                            outputPath ?? 'traduit.pdf',
                             style: Theme.of(context).textTheme.bodyMedium,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -86,13 +76,10 @@ class ResultScreen extends StatelessWidget {
             ),
             const SizedBox(height: 40),
 
-            // Translate another button
             OutlinedButton.icon(
-              onPressed: () {
-                context.go('/');
-              },
+              onPressed: () => context.go('/'),
               icon: const Icon(Icons.add),
-              label: const Text('Translate Another PDF'),
+              label: const Text('Traduire un autre PDF'),
             ),
           ],
         ),

@@ -237,6 +237,10 @@ class _HomeScreenState extends State<HomeScreen> {
                                     .map((l) => l.name)
                                     .join(', '),
                             textStyle: const TextStyle(fontSize: 12, color: Colors.white),
+                            decoration: BoxDecoration(
+                              color: AppTheme.textPrimary,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
                             padding: const EdgeInsets.all(10),
                             child: Row(
                               mainAxisSize: MainAxisSize.min,

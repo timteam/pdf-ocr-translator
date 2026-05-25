@@ -69,31 +69,34 @@ parts:
     stage-packages:
       - poppler-utils
       - curl
+    stage:
+      - -usr/lib/x86_64-linux-gnu/libgnutls*
+      - -usr/share/doc/libgnutls*
 
-  # Environnement Python : PaddleOCR + FastText LID + Opus-MT (ctranslate2 + sentencepiece)
-  # Les packages sont installés avec --target vers $SNAP/pyenv ;
-  # PYTHONPATH=$SNAP/pyenv dans l'environnement de l'app suffit pour que python3 les trouve.
-  # Taille estimée : ~600–900 MB (paddlepaddle-cpu est le principal contributeur).
+  # Environnement Python : PaddleOCR + FastText LID + Opus-MT (ctranslate2 + sentencepiece).
+  # Wheels pré-téléchargés sur l'hôte via scripts/download_pip_wheels.sh (Python 3.12, linux x86_64),
+  # puis copiés dans le container LXC. Aucun réseau requis pendant le build.
+  # PYTHONPATH=$SNAP/pyenv rend les packages visibles par python3 au runtime.
   python-env:
     plugin: nil
+    source: wheels
+    source-type: local
     build-packages:
       - python3
       - python3-pip
-      - python3-dev
-      - build-essential
     stage-packages:
       - python3
-      - python3-minimal
-      - libpython3-stdlib
-      # OpenMP requis par paddlepaddle-cpu et ctranslate2
       - libgomp1
-      # BLAS requis par numpy / paddlepaddle
       - libopenblas0
     override-build: |
       set -e
-      pip3 install --no-cache-dir \
+      pip3 install \
+        --no-cache-dir \
+        --break-system-packages \
+        --no-index \
+        --find-links "$SNAPCRAFT_PART_SRC" \
         --target "$SNAPCRAFT_PART_INSTALL/pyenv" \
-        paddlepaddle-cpu \
+        paddlepaddle \
         paddleocr \
         ctranslate2 \
         sentencepiece \

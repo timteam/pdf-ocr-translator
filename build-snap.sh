@@ -28,22 +28,14 @@ echo -e "${BLUE}✅ Snapcraft found: $(snapcraft --version)${NC}"
 BUILD_DIR="./snap-builds"
 mkdir -p "$BUILD_DIR"
 
-echo -e "${YELLOW}🔍 Checking tessdata_best models...${NC}"
-TESSDATA_DIR="./tessdata"
-REQUIRED_LANGS=(eng fra spa deu ita por nld pol rus jpn jpn_vert chi_sim kor ara hin tha vie)
-MISSING=0
-for lang in "${REQUIRED_LANGS[@]}"; do
-  if [[ ! -f "$TESSDATA_DIR/${lang}.traineddata" ]]; then
-    MISSING=1
-    break
-  fi
-done
-
-if [[ $MISSING -eq 1 ]]; then
-  echo -e "${YELLOW}⬇️  Tessdata best models not found. Downloading...${NC}"
-  ./scripts/setup_tessdata_best.sh
+echo -e "${YELLOW}🔍 Vérification des wheels Python...${NC}"
+WHEELS_DIR="./wheels"
+if ! ls "$WHEELS_DIR"/paddlepaddle*.whl 2>/dev/null | grep -q .; then
+  echo -e "${YELLOW}⬇️  Wheels Python non trouvés. Téléchargement depuis PyPI...${NC}"
+  ./scripts/download_pip_wheels.sh
 else
-  echo -e "${GREEN}✅ Tessdata best models already downloaded.${NC}"
+  echo -e "${GREEN}✅ Wheels Python déjà présents.${NC}"
+  ls -lh "$WHEELS_DIR/"*.whl 2>/dev/null | awk '{print "   " $5 " " $9}'
 fi
 
 echo -e "${YELLOW}🔨 Building Flutter Linux bundle...${NC}"

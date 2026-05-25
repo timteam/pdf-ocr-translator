@@ -281,24 +281,52 @@ class OCRService {
   /// Détecte la langue dominante d'une page via PaddleOCR + FastText.
   Future<String> detectPageLanguage(File imageFile, {int dpi = 150}) async {
     try {
-      final (text, script) = await _callPaddleDetect(imageFile);
-      logger.d('Détection langue: script=$script, ${text.length} car.');
+      // Copie l'image de détection dans le répertoire debug si activé
+      final debugDir = AppLogger.debugDir;
+      if (debugDir != null) {
+        final m = RegExp(r'thumb_(\d+)_').firstMatch(p.basename(imageFile.path));
+        final name = 'detect_page_${m?.group(1) ?? DateTime.now().millisecondsSinceEpoch}.png';
+        try { await imageFile.copy(p.join(debugDir, name)); } catch (_) {}
+        logger.d('Détection lang — image copiée : $name');
+      }
 
-      // Scripts non-latins : la détection Unicode de PaddleOCR est fiable,
-      // pas besoin de FastText.
+      final (text, script) = await _callPaddleDetect(imageFile);
+      logger.d('Détection lang — script=$script, ${text.length} car. extraits'
+          '${text.isNotEmpty ? " : « ${text.substring(0, text.length.clamp(0, 60))}… »" : ""}');
+
+      // Scripts non-latins : la détection Unicode est fiable, pas besoin de FastText
       switch (script) {
-        case 'japanese':   return 'ja';
-        case 'cjk':        return 'zh';
-        case 'korean':     return 'ko';
-        case 'arabic':     return 'ar';
-        case 'cyrillic':   return 'ru';
-        case 'devanagari': return 'hi';
-        case 'thai':       return 'th';
+        case 'japanese':
+          logger.i('Détection lang → ja (hiragana/katakana)');
+          return 'ja';
+        case 'cjk':
+          logger.i('Détection lang → zh (CJK)');
+          return 'zh';
+        case 'korean':
+          logger.i('Détection lang → ko (hangul)');
+          return 'ko';
+        case 'arabic':
+          logger.i('Détection lang → ar (arabe)');
+          return 'ar';
+        case 'cyrillic':
+          logger.i('Détection lang → ru (cyrillique)');
+          return 'ru';
+        case 'devanagari':
+          logger.i('Détection lang → hi (devanagari)');
+          return 'hi';
+        case 'thai':
+          logger.i('Détection lang → th (thaï)');
+          return 'th';
       }
 
       // Script latin → FastText pour distinguer fr/de/es/nl/pl/en…
-      if (text.trim().length < 20) return 'en';
-      return await _classifyWithFastText(text);
+      if (text.trim().length < 20) {
+        logger.i('Détection lang → en (texte insuffisant : ${text.trim().length} car.)');
+        return 'en';
+      }
+      final lang = await _classifyWithFastText(text);
+      logger.i('Détection lang → $lang (FastText, script latin)');
+      return lang;
     } catch (e) {
       logger.w('Détection langue échouée: $e');
       return 'en';

@@ -98,4 +98,3 @@ npm-debug.log*
 output/
 translations_cache/
 models/
-tessdata/

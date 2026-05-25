@@ -55,6 +55,12 @@ def make_ocr(lang):
         lang=lang,
         show_log=False,
         use_gpu=False,
+        # Qualité maximale : modèles server (PP-OCRv4 large) + scoring lent
+        ocr_version="PP-OCRv4",
+        structure_version="PP-StructureV2",
+        det_db_score_mode="slow",    # Scoring polygon précis vs rapide
+        det_db_unclip_ratio=1.6,     # Boîtes légèrement plus larges → moins de coupures
+        rec_batch_num=6,             # Plus de textes en parallèle → meilleure cohérence
     )
 
 

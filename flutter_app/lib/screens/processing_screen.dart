@@ -12,6 +12,45 @@ import '../theme/app_theme.dart';
 
 enum _Phase { detecting, confirming, translating, error }
 
+// ─── Vue zoom plein écran ─────────────────────────────────────────────────────
+
+void _showPageZoom(BuildContext context, String path) {
+  showDialog<void>(
+    context: context,
+    builder: (ctx) => Dialog.fullscreen(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          ColoredBox(color: Colors.black),
+          InteractiveViewer(
+            panEnabled: true,
+            minScale: 0.8,
+            maxScale: 8.0,
+            child: Center(
+              child: Image.file(
+                File(path),
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) =>
+                    const Icon(Icons.broken_image, color: Colors.white54, size: 64),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 16, right: 16,
+            child: SafeArea(
+              child: IconButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                style: IconButton.styleFrom(backgroundColor: Colors.black54),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
 // ─── Écran principal ──────────────────────────────────────────────────────────
 
 class ProcessingScreen extends StatefulWidget {
@@ -259,7 +298,12 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
                 final detectedName = SupportedLanguages.getLanguageByCode(pl.detectedCode).name;
                 return ListTile(
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  leading: _buildThumbnail(pl.thumbnailPath),
+                  leading: GestureDetector(
+                    onTap: pl.thumbnailPath != null
+                        ? () => _showPageZoom(context, pl.thumbnailPath!)
+                        : null,
+                    child: _buildThumbnail(pl.thumbnailPath),
+                  ),
                   title: Text('Page ${pl.pageNumber}',
                       style: const TextStyle(fontWeight: FontWeight.w600)),
                   subtitle: pl.isOverridden
@@ -613,15 +657,18 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
       child: Row(
         children: [
-          // Miniature
+          // Miniature — clic pour zoom plein écran
           if (pl.thumbnailPath != null)
-            ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: Image.file(
-                File(pl.thumbnailPath!),
-                height: 56, width: 40,
-                fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const _PageIcon(),
+            GestureDetector(
+              onTap: () => _showPageZoom(context, pl.thumbnailPath!),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: Image.file(
+                  File(pl.thumbnailPath!),
+                  height: 56, width: 40,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const _PageIcon(),
+                ),
               ),
             )
           else
