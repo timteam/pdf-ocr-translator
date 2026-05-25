@@ -406,8 +406,30 @@ img.Image _ppDilate(img.Image binary) {
 }
 
 // ─── Correction d'inclinaison (deskew) ────────────────────────────────────────
+// Recherche en 3 passes pour couvrir ±85° sans exploser en temps de calcul :
+//   1. ±85° step 5°  sur image 1/12  — repère le cadrant (ex : scan à 35°)
+//   2. ±8°  step 0.3° sur image 1/6  — affine autour du meilleur candidat
+//   3. ±0.5° step 0.05° sur image 1/6 — précision sub-degré finale
 ({img.Image image, double angle, int prepW, int prepH}) _ppDeskew(
     img.Image binary, {List<String>? logs}) {
+  // Passe 1 — très grossière sur image 1/12 (rapide, tolérant les grands angles)
+  const tinyDiv = 12;
+  final tiny = img.copyResize(
+    binary,
+    width: max(1, binary.width ~/ tinyDiv),
+    height: max(1, binary.height ~/ tinyDiv),
+    interpolation: img.Interpolation.average,
+  );
+  tiny.backgroundColor = img.ColorRgb8(255, 255, 255);
+
+  double bestAngle = 0.0;
+  double bestScore = -1.0;
+  for (double a = -85.0; a <= 85.0; a += 5.0) {
+    final score = _ppProjectionVariance(img.copyRotate(tiny, angle: a));
+    if (score > bestScore) { bestScore = score; bestAngle = a; }
+  }
+
+  // Passe 2 — intermédiaire sur image 1/6 (±8° autour du meilleur candidat)
   const sampleDiv = 6;
   final small = img.copyResize(
     binary,
@@ -415,13 +437,18 @@ img.Image _ppDilate(img.Image binary) {
     height: binary.height ~/ sampleDiv,
     interpolation: img.Interpolation.average,
   );
+  small.backgroundColor = img.ColorRgb8(255, 255, 255);
 
-  double bestAngle = 0.0;
-  double bestScore = -1.0;
-  for (double a = -5.0; a <= 5.0; a += 0.3) {
+  double medScore = -1.0;
+  double medAngle = bestAngle;
+  for (double a = bestAngle - 8.0; a <= bestAngle + 8.0; a += 0.3) {
     final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
-    if (score > bestScore) { bestScore = score; bestAngle = a; }
+    if (score > medScore) { medScore = score; medAngle = a; }
   }
+  bestAngle = medAngle;
+  bestScore = medScore;
+
+  // Passe 3 — affinage fin (±0.5° step 0.05°)
   for (double a = bestAngle - 0.5; a <= bestAngle + 0.5; a += 0.05) {
     final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
     if (score > bestScore) { bestScore = score; bestAngle = a; }
