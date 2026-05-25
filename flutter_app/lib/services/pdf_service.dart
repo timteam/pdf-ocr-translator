@@ -101,6 +101,7 @@ class PDFProcessingService {
   Future<void> initialize() async {
     await _translationService.initialize();
     await OCRService.initFastTextModel();
+    await OCRService.initPaddleOCR();
   }
 
   Future<int> _getPageCount(File pdfFile) async {
