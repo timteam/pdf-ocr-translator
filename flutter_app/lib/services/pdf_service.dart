@@ -13,8 +13,10 @@ import 'app_logger.dart';
 import 'ocr_service.dart';
 import 'translation_service.dart';
 import '../models/processing.dart';
+import '../models/language_detection.dart';
 
 const int _renderDpi = 600;
+const int _detectDpi = 150;
 
 const double _phaseRender = 0.10;
 const double _phaseOCR = 0.35;
@@ -141,6 +143,62 @@ class PDFProcessingService {
     return files.first;
   }
 
+  // Détecte la langue dominante de chaque page à 150 DPI.
+  // Les miniatures PNG restent sur disque jusqu'à ce que ProcessingScreen les nettoie.
+  Future<List<PageLanguage>> detectPageLanguages(
+    File pdfFile, {
+    required Function(int current, int total) onPageDetected,
+  }) async {
+    final pageCount = await _getPageCount(pdfFile);
+    final tempDir = await getTemporaryDirectory();
+    final results = <PageLanguage>[];
+
+    for (int i = 1; i <= pageCount; i++) {
+      onPageDetected(i, pageCount);
+
+      final prefix = p.join(
+        tempDir.path,
+        'thumb_${i}_${DateTime.now().millisecondsSinceEpoch}',
+      );
+      final renderResult = await Process.run('pdftoppm', [
+        '-r', '$_detectDpi', '-png', '-f', '$i', '-l', '$i',
+        pdfFile.path, prefix,
+      ]);
+
+      String? thumbnailPath;
+      String detectedLang = 'en';
+
+      if (renderResult.exitCode == 0) {
+        final files = tempDir
+            .listSync()
+            .whereType<File>()
+            .where((f) => p.basename(f.path).startsWith(p.basename(prefix)))
+            .toList();
+        if (files.isNotEmpty) {
+          thumbnailPath = files.first.path;
+          try {
+            detectedLang = await _ocrService.detectPageLanguage(
+              files.first, dpi: _detectDpi,
+            );
+          } catch (e) {
+            logger.w('Détection langue page $i échouée: $e');
+          }
+        }
+      } else {
+        logger.w('Rendu détection page $i échoué: ${renderResult.stderr}');
+      }
+
+      logger.i('Page $i: langue détectée = $detectedLang');
+      results.add(PageLanguage(
+        pageNumber: i,
+        detectedCode: detectedLang,
+        thumbnailPath: thumbnailPath,
+      ));
+    }
+
+    return results;
+  }
+
   // Émet une mise à jour de progression et cède un frame à l'event loop.
   Future<void> _emit(
     Function(ProcessingUpdate) onProgress,
@@ -152,7 +210,7 @@ class PDFProcessingService {
 
   Future<String> processPDF({
     required File pdfFile,
-    required String sourceLanguage,
+    required List<PageLanguage> pageLanguages,
     required String targetLanguage,
     required String outputPath,
     required Function(ProcessingUpdate) onProgress,
@@ -165,7 +223,7 @@ class PDFProcessingService {
       AppLogger.setOutputPath(outputPath, debug: debugMode);
       logger.i('=== processPDF démarré ===');
       logger.i('  PDF source   : ${pdfFile.path}');
-      logger.i('  Langue src   : $sourceLanguage');
+      logger.i('  Langues src  : ${pageLanguages.map((p) => 'p${p.pageNumber}=${p.effectiveCode}').join(', ')}');
       logger.i('  Langue cible : $targetLanguage');
       logger.i('  Sortie       : $outputPath');
       logger.i('  Exécutable   : ${Platform.resolvedExecutable}');
@@ -181,6 +239,13 @@ class PDFProcessingService {
       final fontBytes = fontData.buffer.asUint8List();
 
       for (int pageIndex = 1; pageIndex <= pageCount; pageIndex++) {
+        final sourceLanguage = pageLanguages
+            .firstWhere(
+              (pl) => pl.pageNumber == pageIndex,
+              orElse: () => PageLanguage(pageNumber: pageIndex, detectedCode: 'en'),
+            )
+            .effectiveCode;
+
         // Étape 1 — Rendu
         await _emit(onProgress, ProcessingUpdate(
           currentPage: pageIndex, totalPages: pageCount,

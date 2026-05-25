@@ -15,7 +15,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  String? selectedSourceLanguage;
   String? selectedTargetLanguage;
   String? selectedPdfPath;
   bool _debugMode = false;
@@ -23,7 +22,6 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    selectedSourceLanguage = 'en';
     selectedTargetLanguage = 'fr';
     _requestPermissions();
   }
@@ -67,14 +65,12 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Dialogue de choix du fichier de sortie
     final outputPath = await _pickOutputPath();
-    if (outputPath == null) return; // annulé par l'utilisateur
+    if (outputPath == null) return;
 
     if (mounted) {
       context.go('/processing', extra: {
         'pdfPath': selectedPdfPath,
-        'sourceLanguage': selectedSourceLanguage,
         'targetLanguage': selectedTargetLanguage,
         'outputPath': outputPath,
         'debugMode': _debugMode,
@@ -219,36 +215,53 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 20),
 
-              // Sélection des langues
+              // Langue cible + infobulle langues supportées
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Langues',
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w600,
+                      Row(
+                        children: [
+                          Text(
+                            'Langue cible',
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                          const Spacer(),
+                          Tooltip(
+                            message: 'Langues reconnues automatiquement :\n'
+                                + SupportedLanguages.languages
+                                    .map((l) => l.name)
+                                    .join(', '),
+                            textStyle: const TextStyle(fontSize: 12, color: Colors.white),
+                            padding: const EdgeInsets.all(10),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.auto_awesome,
+                                    size: 14, color: AppTheme.textSecondary),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Langue source auto',
+                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                        color: AppTheme.textSecondary,
+                                      ),
+                                ),
+                                const SizedBox(width: 4),
+                                Icon(Icons.info_outline,
+                                    size: 14, color: AppTheme.textSecondary),
+                              ],
                             ),
-                      ),
-                      const SizedBox(height: 16),
-                      DropdownButtonFormField<String>(
-                        initialValue: selectedSourceLanguage,
-                        decoration: const InputDecoration(labelText: 'Langue source'),
-                        items: SupportedLanguages.languages
-                            .map((lang) => DropdownMenuItem(
-                                  value: lang.code,
-                                  child: Text(lang.name),
-                                ))
-                            .toList(),
-                        onChanged: (value) =>
-                            setState(() => selectedSourceLanguage = value),
+                          ),
+                        ],
                       ),
                       const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
                         initialValue: selectedTargetLanguage,
-                        decoration: const InputDecoration(labelText: 'Langue cible'),
+                        decoration: const InputDecoration(labelText: 'Traduire vers'),
                         items: SupportedLanguages.languages
                             .map((lang) => DropdownMenuItem(
                                   value: lang.code,

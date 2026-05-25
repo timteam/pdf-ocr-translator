@@ -64,7 +64,6 @@ class MyApp extends StatelessWidget {
             final extra = state.extra as Map<String, dynamic>?;
             return ProcessingScreen(
               pdfPath: extra?['pdfPath'],
-              sourceLanguage: extra?['sourceLanguage'],
               targetLanguage: extra?['targetLanguage'],
               outputPath: extra?['outputPath'],
               debugMode: extra?['debugMode'] as bool? ?? false,

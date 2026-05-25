@@ -1065,6 +1065,126 @@ class OCRService {
         .toList();
   }
 
+  // ─── Détection de langue ──────────────────────────────────────────────────────
+
+  /// Détecte la langue dominante d'une page à partir de son image rendue.
+  /// Utilise Tesseract OSD (orientation/script detection) en priorité,
+  /// puis une analyse Unicode + word-frequency pour les scripts latins.
+  Future<String> detectPageLanguage(File imageFile, {int dpi = 150}) async {
+    final script = await _detectScript(imageFile);
+    logger.d('Détection langue page: OSD script="${script}"');
+    switch (script.toLowerCase()) {
+      case 'japanese': return 'ja';
+      case 'han': case 'chinese': case 'han_simplified':
+      case 'chinese_simplified': case 'chinese_traditional': return 'zh';
+      case 'korean': case 'hangul': return 'ko';
+      case 'arabic': return 'ar';
+      case 'cyrillic': return 'ru';
+      case 'devanagari': return 'hi';
+      case 'thai': return 'th';
+      default:
+        return await _detectByTextAnalysis(imageFile, dpi: dpi);
+    }
+  }
+
+  Future<String> _detectScript(File imageFile) async {
+    try {
+      final env = await _tessdataEnv();
+      final result = await Process.run(
+        'tesseract',
+        [imageFile.path, 'stdout', '--psm', '0', '-l', 'osd'],
+        environment: env,
+      );
+      if (result.exitCode == 0) {
+        final match = RegExp(r'Script:\s*(\w+)', caseSensitive: false)
+            .firstMatch(result.stdout as String);
+        if (match != null) return match.group(1)!;
+      }
+    } catch (e) {
+      logger.d('OSD indisponible: $e');
+    }
+    return 'unknown';
+  }
+
+  Future<String> _detectByTextAnalysis(File imageFile, {int dpi = 150}) async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final blocks = await _runOCR(
+        imageFile,
+        'jpn+chi_sim+kor+rus+ara+hin+tha+eng+fra+deu+spa+ita+por+nld+pol+vie',
+        tempDir,
+        psm: '3', dpi: dpi,
+      );
+      final text = blocks.map((b) => b.text).join(' ');
+      if (text.trim().isEmpty) return 'en';
+      final byScript = _detectScriptFromText(text);
+      if (byScript != null) return byScript;
+      return _matchLatinLanguage(text);
+    } catch (e) {
+      logger.d('Analyse texte pour détection échouée: $e');
+      return 'en';
+    }
+  }
+
+  String? _detectScriptFromText(String text) {
+    int hiraganaKatakana = 0, hangul = 0, arabic = 0, cyrillic = 0;
+    int devanagari = 0, thai = 0, cjk = 0, vietnamese = 0, total = 0;
+    for (final r in text.runes) {
+      total++;
+      if (r >= 0x3040 && r <= 0x30FF) hiraganaKatakana++;
+      else if (r >= 0xAC00 && r <= 0xD7AF) hangul++;
+      else if (r >= 0x0600 && r <= 0x06FF) arabic++;
+      else if (r >= 0x0400 && r <= 0x04FF) cyrillic++;
+      else if (r >= 0x0900 && r <= 0x097F) devanagari++;
+      else if (r >= 0x0E00 && r <= 0x0E7F) thai++;
+      else if (r >= 0x4E00 && r <= 0x9FFF) cjk++;
+      else if ((r >= 0x1EA0 && r <= 0x1EF9) ||
+               r == 0x0111 || r == 0x01A1 || r == 0x01B0) vietnamese++;
+    }
+    if (total == 0) return null;
+    final t = total;
+    if (hiraganaKatakana > 0) return 'ja';
+    if (hangul / t > 0.05) return 'ko';
+    if (arabic / t > 0.05) return 'ar';
+    if (cyrillic / t > 0.05) return 'ru';
+    if (devanagari / t > 0.05) return 'hi';
+    if (thai / t > 0.05) return 'th';
+    if (cjk / t > 0.05) return 'zh';
+    if (vietnamese / t > 0.03) return 'vi';
+    return null;
+  }
+
+  String _matchLatinLanguage(String text) {
+    final words = text
+        .toLowerCase()
+        .replaceAll(RegExp(r"[^\w\s]"), ' ')
+        .split(RegExp(r'\s+'))
+        .where((w) => w.length >= 2)
+        .toSet();
+
+    const markers = <String, List<String>>{
+      'fr': ['le', 'la', 'les', 'de', 'du', 'des', 'est', 'une', 'pour', 'dans', 'avec', 'sur', 'au', 'par', 'ne', 'pas', 'que', 'qui', 'ce', 'se', 'un', 'et', 'il', 'on', 'en', 'son', 'sa', 'ses'],
+      'de': ['der', 'die', 'das', 'und', 'ist', 'mit', 'von', 'auf', 'zu', 'ein', 'eine', 'des', 'dem', 'den', 'nicht', 'sich', 'bei', 'als', 'auch', 'werden', 'wird', 'im', 'oder', 'haben'],
+      'es': ['del', 'con', 'por', 'para', 'una', 'como', 'pero', 'sobre', 'cuando', 'los', 'las', 'son', 'han', 'su', 'sus', 'ya', 'sin', 'que', 'este', 'esta'],
+      'it': ['del', 'con', 'per', 'una', 'che', 'sono', 'anche', 'come', 'alla', 'agli', 'dei', 'gli', 'questo', 'questa', 'nelle', 'nella', 'dal', 'dello'],
+      'pt': ['dos', 'das', 'com', 'por', 'para', 'mais', 'como', 'uma', 'este', 'essa', 'ser', 'pela', 'pelo', 'nos', 'foi', 'seu', 'sua'],
+      'nl': ['het', 'een', 'van', 'op', 'met', 'voor', 'aan', 'dit', 'zijn', 'wordt', 'kan', 'worden', 'ook', 'dat', 'bij', 'heeft', 'door', 'naar', 'hun'],
+      'pl': ['sie', 'nie', 'jest', 'jak', 'ale', 'czy', 'przez', 'juz', 'do', 'na', 'po', 'ze', 'tak', 'co', 'ich', 'tej', 'tym'],
+      'en': ['the', 'of', 'and', 'to', 'in', 'is', 'it', 'you', 'that', 'he', 'was', 'for', 'on', 'are', 'with', 'as', 'at', 'this', 'be', 'have', 'from', 'or', 'an', 'will', 'not', 'all'],
+    };
+
+    final scores = <String, int>{};
+    for (final word in words) {
+      for (final entry in markers.entries) {
+        if (entry.value.contains(word)) {
+          scores[entry.key] = (scores[entry.key] ?? 0) + 1;
+        }
+      }
+    }
+    if (scores.isEmpty) return 'en';
+    return scores.entries.reduce((a, b) => a.value >= b.value ? a : b).key;
+  }
+
   bool _isGarbageText(String text) {
     final stripped = text.trim();
     if (stripped.isEmpty) return true;
