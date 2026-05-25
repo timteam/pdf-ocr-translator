@@ -1,8 +1,10 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' show Rect;
 import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
@@ -603,6 +605,25 @@ class OCRService {
   final logger = AppLogger.build();
 
   static String? _localTessdata;
+  static String? _fastTextModelPath;
+
+  /// Extrait le modèle FastText LID depuis les assets Flutter vers le répertoire
+  /// de données de l'application. À appeler une fois au démarrage.
+  static Future<void> initFastTextModel() async {
+    try {
+      final appDir = await getApplicationSupportDirectory();
+      final modelFile = File(p.join(appDir.path, 'lid.176.ftz'));
+
+      if (!await modelFile.exists()) {
+        final data = await rootBundle.load('assets/models/lid.176.ftz');
+        await modelFile.writeAsBytes(data.buffer.asUint8List());
+      }
+      _fastTextModelPath = modelFile.path;
+    } catch (e) {
+      // Modèle absent des assets → la détection utilisera le fallback heuristique.
+      _fastTextModelPath = null;
+    }
+  }
 
   Future<Map<String, String>?> _tessdataEnv() async {
     if (Platform.environment.containsKey('TESSDATA_PREFIX')) {
@@ -1117,12 +1138,72 @@ class OCRService {
       );
       final text = blocks.map((b) => b.text).join(' ');
       if (text.trim().isEmpty) return 'en';
+
+      if (_fastTextModelPath != null) {
+        return await _classifyWithFastText(text);
+      }
+      // Fallback heuristique (FastText absent ou modèle non chargé)
       final byScript = _detectScriptFromText(text);
       if (byScript != null) return byScript;
       return _matchLatinLanguage(text);
     } catch (e) {
       logger.d('Analyse texte pour détection échouée: $e');
       return 'en';
+    }
+  }
+
+  /// Envoie le texte extrait au binaire `fasttext` via stdin et retourne le
+  /// code BCP-47 prédit (ex. "fr", "ja"). Retourne "en" en cas d'erreur.
+  Future<String> _classifyWithFastText(String text) async {
+    // Nettoyer et tronquer : fasttext n'a pas besoin de plus de ~1 000 chars
+    final input = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final snippet = input.length > 1000 ? input.substring(0, 1000) : input;
+    if (snippet.isEmpty) return 'en';
+
+    try {
+      final process = await Process.start(
+        'fasttext',
+        ['predict', _fastTextModelPath!, '-'],
+      );
+      process.stdin.writeln(snippet);
+      await process.stdin.close();
+
+      // Drain stdout et stderr en parallèle pour éviter tout deadlock
+      final stdoutFuture = process.stdout.transform(utf8.decoder).join();
+      process.stderr.drain<List<int>>();
+      final raw = await stdoutFuture;
+      await process.exitCode;
+
+      // Sortie attendue : "__label__fr\n"
+      final label = raw.trim().split('\n').first.trim();
+      if (!label.startsWith('__label__')) {
+        logger.w('FastText: sortie inattendue "$label"');
+        return 'en';
+      }
+      final code = label.substring('__label__'.length).trim();
+      final mapped = _mapFastTextCode(code);
+      logger.d('FastText: $code → $mapped');
+      return mapped;
+    } catch (e) {
+      logger.w('fasttext non disponible ou erreur: $e');
+      // Fallback heuristique
+      final byScript = _detectScriptFromText(text);
+      if (byScript != null) return byScript;
+      return _matchLatinLanguage(text);
+    }
+  }
+
+  /// Traduit un code FastText LID vers les codes BCP-47 supportés par l'app.
+  String _mapFastTextCode(String code) {
+    const supported = {
+      'en', 'fr', 'de', 'es', 'it', 'pt', 'nl', 'pl', 'vi',
+      'ja', 'zh', 'ko', 'ru', 'ar', 'hi', 'th',
+    };
+    if (supported.contains(code)) return code;
+    switch (code) {
+      case 'zh_TW': case 'zh_Hant': case 'zht': return 'zh';
+      case 'pt_BR': case 'pt_PT': return 'pt';
+      default: return 'en';
     }
   }
 
