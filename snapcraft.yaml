@@ -4,8 +4,12 @@ title: PDF OCR Translator
 summary: Fully offline PDF OCR and translation app
 description: |
   PDF OCR Translator extracts text from image-based PDF files using
-  Tesseract OCR and translates it to multiple languages. All OCR
-  processing happens locally on your device — no backend, no cloud.
+  PaddleOCR and translates it offline using Opus-MT neural models.
+  Language detection uses FastText LID (176 languages).
+  All processing happens locally on your device — no backend, no cloud.
+
+  On first use, PaddleOCR recognition models (~200 MB) and translation
+  models (~50 MB per language pair) are downloaded automatically.
 
 license: Apache-2.0
 website: https://github.com/timteam/pdf-ocr-translator
@@ -25,7 +29,8 @@ apps:
   pdf-ocr-translator:
     command: pdf_ocr_translator
     environment:
-      TESSDATA_PREFIX: $SNAP/usr/share/tesseract-ocr/5/tessdata
+      # Rend les packages pip (PaddleOCR, ctranslate2, fasttext…) visibles par python3
+      PYTHONPATH: $SNAP/pyenv
     plugs:
       - home
       - network
@@ -57,30 +62,39 @@ parts:
       - libgles2
       - libegl1
 
-  tesseract:
+  # Outils PDF : rendu page (pdftoppm), comptage (pdfinfo), texte embarqué (pdftotext)
+  # curl : téléchargement des modèles Opus-MT depuis HuggingFace au runtime
+  poppler:
     plugin: nil
     stage-packages:
       - poppler-utils
-      - tesseract-ocr
-    # Exclure uniquement les .traineddata apt (remplacés par tessdata-best)
-    # mais conserver configs/ et tessconfigs/ dont tesseract a besoin
-    # pour produire la sortie TSV (read_params_file: Can't open tsv sinon).
-    stage:
-      - -usr/share/tesseract-ocr/5/tessdata/*.traineddata
-    prime:
-      - -usr/lib/x86_64-linux-gnu/libicuio.so*
-      - -usr/lib/x86_64-linux-gnu/libicutest.so*
-      - -usr/lib/x86_64-linux-gnu/libssl3.so*
+      - curl
 
-  # Modèles tessdata_best — téléchargés localement via scripts/setup_tessdata_best.sh
-  # avant de builder le snap. Les fichiers .traineddata remplacent les modèles
-  # standard des packages apt (meilleure précision, même chemin TESSDATA_PREFIX).
-  tessdata-best:
+  # Environnement Python : PaddleOCR + FastText LID + Opus-MT (ctranslate2 + sentencepiece)
+  # Les packages sont installés avec --target vers $SNAP/pyenv ;
+  # PYTHONPATH=$SNAP/pyenv dans l'environnement de l'app suffit pour que python3 les trouve.
+  # Taille estimée : ~600–900 MB (paddlepaddle-cpu est le principal contributeur).
+  python-env:
     plugin: nil
-    source: tessdata
-    source-type: local
+    build-packages:
+      - python3
+      - python3-pip
+      - python3-dev
+      - build-essential
+    stage-packages:
+      - python3
+      - python3-minimal
+      - libpython3-stdlib
+      # OpenMP requis par paddlepaddle-cpu et ctranslate2
+      - libgomp1
+      # BLAS requis par numpy / paddlepaddle
+      - libopenblas0
     override-build: |
       set -e
-      DEST=$SNAPCRAFT_PART_INSTALL/usr/share/tesseract-ocr/5/tessdata
-      mkdir -p $DEST
-      cp $SNAPCRAFT_PART_SRC/*.traineddata $DEST/
+      pip3 install --no-cache-dir \
+        --target "$SNAPCRAFT_PART_INSTALL/pyenv" \
+        paddlepaddle-cpu \
+        paddleocr \
+        ctranslate2 \
+        sentencepiece \
+        fasttext-wheel

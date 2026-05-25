@@ -158,22 +158,30 @@ class OCRService {
   final logger = AppLogger.build();
 
   static String? _fastTextModelPath;
+  static String? _fastTextScriptPath;
   static String? _ocrScriptPath;
 
   // ─── Initialisation ────────────────────────────────────────────────────────
 
-  /// Extrait le modèle FastText LID depuis les assets vers le répertoire de données.
+  /// Extrait le modèle FastText LID et le script de détection depuis les assets.
   static Future<void> initFastTextModel() async {
     try {
       final appDir = await getApplicationSupportDirectory();
+
       final modelFile = File(p.join(appDir.path, 'lid.176.ftz'));
       if (!await modelFile.exists()) {
         final data = await rootBundle.load('assets/models/lid.176.ftz');
         await modelFile.writeAsBytes(data.buffer.asUint8List());
       }
       _fastTextModelPath = modelFile.path;
+
+      final scriptFile = File(p.join(appDir.path, 'fasttext_detect.py'));
+      final src = await rootBundle.loadString('assets/scripts/fasttext_detect.py');
+      await scriptFile.writeAsString(src);
+      _fastTextScriptPath = scriptFile.path;
     } catch (e) {
       _fastTextModelPath = null;
+      _fastTextScriptPath = null;
     }
   }
 
@@ -384,7 +392,7 @@ class OCRService {
     if (snippet.isEmpty) return 'en';
 
     final process = await Process.start(
-      'fasttext', ['predict', _fastTextModelPath!, '-'],
+      'python3', [_fastTextScriptPath!, _fastTextModelPath!],
     );
     process.stdin.writeln(snippet);
     await process.stdin.close();
