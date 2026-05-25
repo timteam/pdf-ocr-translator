@@ -149,24 +149,50 @@ def is_latin_or_empty(text):
 
 def run_detect(image_path):
     """
-    Passe 1 : modèle ch  → fiable pour CJK, japonais, coréen, arabe, cyrillique, devanagari, thaï.
-    Passe 2 : modèle en  → uniquement si la page semble latine (texte ch vide/latin).
+    Détection de script en 3 passes au maximum.
+
+    Passe 1 : modèle ch  → fiable pour CJK, coréen, arabe, cyrillique, devanagari, thaï.
+              Si le script est clairement non-latin et non-CJK → terminé.
+              Si "cjk" → ambiguïté chinois/japonais → passe 2.
+              Si latin/vide → possible page japonaise à katakana dominant → passe 2.
+
+    Passe 2 : modèle japan → détecte hiragana/katakana.
+              Si "japanese" → terminé.
+              Si "cjk" ET passe 1 était déjà "cjk" → chinois → terminé.
+              Sinon → passe 3.
+
+    Passe 3 : modèle en  → pages latines uniquement.
     """
+    # ── Passe 1 : modèle ch ──────────────────────────────────────────────────
     ocr_ch = make_ocr("ch")
-    result_ch = ocr_ch(image_path)
-    text_ch = text_from_result(result_ch)
+    text_ch = text_from_result(ocr_ch(image_path))
+    script_ch = detect_dominant_script(text_ch)
 
-    script = detect_dominant_script(text_ch)
-
-    if script != "latin" or not is_latin_or_empty(text_ch):
-        # Non-latin détecté, ou texte ch déjà exploitable
-        json.dump({"text": text_ch, "script": script}, sys.stdout, ensure_ascii=False)
+    # Scripts sans ambiguïté → réponse immédiate
+    if script_ch in ("arabic", "cyrillic", "devanagari", "thai", "korean", "japanese"):
+        json.dump({"text": text_ch, "script": script_ch}, sys.stdout, ensure_ascii=False)
         return
 
-    # Page latine : passe 2 avec modèle en pour un meilleur texte
+    # ── Passe 2 : modèle japan ───────────────────────────────────────────────
+    # Nécessaire si ch voit "cjk" (kanji → chinois ou japonais ?) ou échoue
+    # (pages à katakana/hiragana dominants que ch ne reconnaît pas bien).
+    if script_ch == "cjk" or is_latin_or_empty(text_ch):
+        ocr_jp = make_ocr("japan")
+        text_jp = text_from_result(ocr_jp(image_path))
+        script_jp = detect_dominant_script(text_jp)
+
+        if script_jp == "japanese":
+            json.dump({"text": text_jp, "script": "japanese"}, sys.stdout, ensure_ascii=False)
+            return
+
+        if script_ch == "cjk":
+            # ch et japan voient du CJK sans hiragana/katakana → chinois
+            json.dump({"text": text_ch, "script": "cjk"}, sys.stdout, ensure_ascii=False)
+            return
+
+    # ── Passe 3 : modèle en  ─────────────────────────────────────────────────
     ocr_en = make_ocr("en")
-    result_en = ocr_en(image_path)
-    text_en = text_from_result(result_en)
+    text_en = text_from_result(ocr_en(image_path))
     json.dump({"text": text_en, "script": "latin"}, sys.stdout, ensure_ascii=False)
 
 

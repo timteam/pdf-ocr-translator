@@ -281,8 +281,22 @@ class OCRService {
   /// Détecte la langue dominante d'une page via PaddleOCR + FastText.
   Future<String> detectPageLanguage(File imageFile, {int dpi = 150}) async {
     try {
-      final text = await _callPaddleDetect(imageFile);
-      logger.d('Détection langue: ${text.length} caractères extraits');
+      final (text, script) = await _callPaddleDetect(imageFile);
+      logger.d('Détection langue: script=$script, ${text.length} car.');
+
+      // Scripts non-latins : la détection Unicode de PaddleOCR est fiable,
+      // pas besoin de FastText.
+      switch (script) {
+        case 'japanese':   return 'ja';
+        case 'cjk':        return 'zh';
+        case 'korean':     return 'ko';
+        case 'arabic':     return 'ar';
+        case 'cyrillic':   return 'ru';
+        case 'devanagari': return 'hi';
+        case 'thai':       return 'th';
+      }
+
+      // Script latin → FastText pour distinguer fr/de/es/nl/pl/en…
       if (text.trim().length < 20) return 'en';
       return await _classifyWithFastText(text);
     } catch (e) {
@@ -326,7 +340,7 @@ class OCRService {
     }).toList();
   }
 
-  Future<String> _callPaddleDetect(File imageFile) async {
+  Future<(String text, String script)> _callPaddleDetect(File imageFile) async {
     if (_ocrScriptPath == null) throw Exception('Script PaddleOCR non initialisé.');
 
     final process = await Process.start(
@@ -344,7 +358,10 @@ class OCRService {
     await process.exitCode;
 
     final data = json.decode(output) as Map<String, dynamic>;
-    return (data['text'] as String?) ?? '';
+    return (
+      (data['text'] as String?) ?? '',
+      (data['script'] as String?) ?? 'latin',
+    );
   }
 
   // ─── Transformation inverse (deskew) ──────────────────────────────────────
