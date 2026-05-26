@@ -28,15 +28,10 @@ echo -e "${BLUE}✅ Snapcraft found: $(snapcraft --version)${NC}"
 BUILD_DIR="./snap-builds"
 mkdir -p "$BUILD_DIR"
 
-echo -e "${YELLOW}🔍 Vérification des wheels Python...${NC}"
-WHEELS_DIR="./wheels"
-if ! ls "$WHEELS_DIR"/paddlepaddle*.whl 2>/dev/null | grep -q .; then
-  echo -e "${YELLOW}⬇️  Wheels Python non trouvés. Téléchargement depuis PyPI...${NC}"
-  ./scripts/download_pip_wheels.sh
-else
-  echo -e "${GREEN}✅ Wheels Python déjà présents.${NC}"
-  ls -lh "$WHEELS_DIR/"*.whl 2>/dev/null | awk '{print "   " $5 " " $9}'
-fi
+echo -e "${YELLOW}🔍 Téléchargement/vérification des wheels Python...${NC}"
+# Toujours exécuter le script : il est idempotent (skip les fichiers déjà complets)
+# et s'assure que toutes les dépendances transitives sont présentes.
+./scripts/download_pip_wheels.sh
 
 echo -e "${YELLOW}🔨 Building Flutter Linux bundle...${NC}"
 echo "This may take several minutes..."

@@ -10,6 +10,24 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'app_logger.dart';
 
+/// Construit l'environnement à passer aux sous-processus Python.
+///
+/// Priorité :
+///   1. $SNAP/pyenv  — contexte snap (PYTHONPATH déjà défini par le snap runtime)
+///   2. <exe_dir>/pyenv — bundle extrait ou run hors-snap depuis le répertoire snap
+///   3. Environnement hérité inchangé — Python système ou venv activé manuellement
+Map<String, String> _buildPythonEnv() {
+  final env = Map<String, String>.from(Platform.environment);
+  if (env.containsKey('PYTHONPATH')) return env;
+
+  final exeDir = p.dirname(Platform.resolvedExecutable);
+  final localPyenv = p.join(exeDir, 'pyenv');
+  if (Directory(localPyenv).existsSync()) {
+    env['PYTHONPATH'] = localPyenv;
+  }
+  return env;
+}
+
 // ─── Fonctions top-level (isolate-safe) ───────────────────────────────────────
 
 /// Corrige l'inclinaison de l'image (deskew 3 passes ±85°) dans un isolate.
@@ -340,6 +358,7 @@ class OCRService {
 
     final process = await Process.start(
       'python3', [_ocrScriptPath!, 'ocr', imageFile.path, language],
+      environment: _buildPythonEnv(),
     );
 
     final stdoutFuture = process.stdout.transform(utf8.decoder).join();
@@ -373,6 +392,7 @@ class OCRService {
 
     final process = await Process.start(
       'python3', [_ocrScriptPath!, 'detect', imageFile.path],
+      environment: _buildPythonEnv(),
     );
 
     final stdoutFuture = process.stdout.transform(utf8.decoder).join();
@@ -438,6 +458,7 @@ class OCRService {
 
     final process = await Process.start(
       'python3', [_fastTextScriptPath!, _fastTextModelPath!],
+      environment: _buildPythonEnv(),
     );
     process.stdin.writeln(snippet);
     await process.stdin.close();

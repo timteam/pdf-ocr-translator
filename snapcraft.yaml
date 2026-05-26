@@ -17,27 +17,45 @@ contact: timothee.troncy@gmail.com
 
 grade: devel
 confinement: strict
-base: core26
-build-base: devel
+base: core24
 
 lint:
   ignore:
     - library
     - classic
 
+# gnome-46-2404 fournit GTK3 + GDK-Pixbuf + libepoxy (stack GNOME complète).
+# Le répertoire gnome-platform doit exister dans le snap pour que le content
+# interface puisse y monter le contenu du snap gnome-46-2404 au runtime.
+plugs:
+  gnome-46-2404:
+    interface: content
+    target: $SNAP/gnome-platform
+    default-provider: gnome-46-2404
+
 apps:
   pdf-ocr-translator:
     command: pdf_ocr_translator
-    environment:
-      # Rend les packages pip (PaddleOCR, ctranslate2, fasttext…) visibles par python3
-      PYTHONPATH: $SNAP/pyenv
     plugs:
       - home
       - network
+      - desktop
+      - desktop-legacy
+      - gsettings
       - opengl
       - wayland
       - x11
       - removable-media
+      - gnome-46-2404
+    environment:
+      PYTHONPATH: $SNAP/pyenv
+      # GTK3 / GDK-Pixbuf / libepoxy viennent du content snap monté à runtime
+      SNAP_DESKTOP_RUNTIME: $SNAP/gnome-platform
+      LD_LIBRARY_PATH: $SNAP/gnome-platform/lib/x86_64-linux-gnu:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      XDG_DATA_DIRS: $SNAP/gnome-platform/usr/share:$SNAP/usr/share:$XDG_DATA_DIRS
+      GDK_PIXBUF_MODULE_FILE: $SNAP/gnome-platform/usr/lib/x86_64-linux-gnu/gdk-pixbuf-current/loaders.cache
+      # EGL : libEGL.so.1 (GLVND) trouve libEGL_mesa.so.0 via les ICD stagés
+      __EGL_VENDOR_LIBRARY_DIRS: $SNAP/usr/share/glvnd/egl_vendor.d
 
 parts:
   flutter-app:
@@ -49,34 +67,32 @@ parts:
     stage:
       - '*'
 
-  # Dépendances GTK3 requises par libflutter_linux_gtk.so et les plugins
-  gtk-runtime:
+  # Répertoire de montage pour le content snap gnome-46-2404 (doit exister)
+  gnome-platform-dir:
+    plugin: nil
+    override-prime: |
+      mkdir -p "$SNAPCRAFT_PRIME/gnome-platform"
+
+  # EGL : libepoxy (fourni par le content snap) dlopen-charge libEGL.so.1 au
+  # runtime. libEGL.so.1 (GLVND) doit trouver un provider via les ICD dans
+  # __EGL_VENDOR_LIBRARY_DIRS. libegl-mesa0 fournit libEGL_mesa.so.0 et le
+  # fichier ICD 50_mesa.json — sans lui, epoxy lève "No provider of
+  # eglGetPlatformDisplayEXT found" et l'app crashe.
+  egl-runtime:
     plugin: nil
     stage-packages:
-      - libatk1.0-0
-      - libcairo2
-      - libepoxy0
-      - libgdk-pixbuf2.0-0
-      - libgtk-3-0
-      - libgl1
-      - libgles2
       - libegl1
+      - libegl-mesa0
 
-  # Outils PDF : rendu page (pdftoppm), comptage (pdfinfo), texte embarqué (pdftotext)
+  # Outils PDF : pdftoppm (rendu page), pdfinfo (comptage), pdftotext
   # curl : téléchargement des modèles Opus-MT depuis HuggingFace au runtime
   poppler:
     plugin: nil
     stage-packages:
       - poppler-utils
       - curl
-    stage:
-      - -usr/lib/x86_64-linux-gnu/libgnutls*
-      - -usr/share/doc/libgnutls*
 
-  # Environnement Python : PaddleOCR + FastText LID + Opus-MT (ctranslate2 + sentencepiece).
-  # Wheels pré-téléchargés sur l'hôte via scripts/download_pip_wheels.sh (Python 3.12, linux x86_64),
-  # puis copiés dans le container LXC. Aucun réseau requis pendant le build.
-  # PYTHONPATH=$SNAP/pyenv rend les packages visibles par python3 au runtime.
+  # Python + libs de calcul pour PaddleOCR/FastText/CTranslate2
   python-env:
     plugin: nil
     source: wheels
@@ -101,3 +117,54 @@ parts:
         ctranslate2 \
         sentencepiece \
         fasttext-wheel
+
+  # Vérifie au moment du build que toutes les dépendances runtime sont présentes.
+  # Un fichier manquant = build échoue immédiatement avec un message clair,
+  # plutôt qu'un crash silencieux à l'exécution.
+  verify-runtime-deps:
+    plugin: nil
+    after:
+      - flutter-app
+      - gnome-platform-dir
+      - egl-runtime
+      - poppler
+      - python-env
+    override-prime: |
+      set -e
+      ok=0; fail=0
+      check() {
+        local pattern="$1" label="$2"
+        if ls "$SNAPCRAFT_PRIME"/$pattern >/dev/null 2>&1; then
+          echo "  ✅ $label"
+          ok=$((ok+1))
+        else
+          echo "  ❌ MANQUANT : $label  ($pattern)"
+          fail=$((fail+1))
+        fi
+      }
+
+      echo "--- Vérification des dépendances runtime ---"
+      check "pdf_ocr_translator"                                              "binaire Flutter"
+      check "lib/libflutter_linux_gtk.so"                                     "Flutter GTK engine"
+      check "usr/bin/pdftoppm"                                                "pdftoppm (poppler)"
+      check "usr/bin/pdfinfo"                                                 "pdfinfo (poppler)"
+      check "usr/bin/pdftotext"                                               "pdftotext (texte embarqué)"
+      check "usr/bin/pdfunite"                                                "pdfunite (assemblage PDF)"
+      check "usr/bin/curl"                                                    "curl"
+      check "usr/bin/python3*"                                                "python3"
+      check "usr/lib/x86_64-linux-gnu/libEGL.so.1*"                          "libEGL.so.1 (GLVND)"
+      check "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0*"                     "libEGL_mesa.so.0 (Mesa EGL)"
+      check "usr/share/glvnd/egl_vendor.d/50_mesa.json"                      "EGL ICD (50_mesa.json)"
+      check "usr/lib/x86_64-linux-gnu/libgomp.so*"                           "libgomp (OpenMP)"
+      check "usr/lib/x86_64-linux-gnu/libopenblas*"                          "libopenblas"
+      check "pyenv/paddleocr*"                                                "paddleocr (Python)"
+      check "pyenv/paddlepaddle*"                                             "paddlepaddle (Python)"
+      check "pyenv/ctranslate2*"                                              "ctranslate2 (Python)"
+      check "pyenv/sentencepiece*"                                            "sentencepiece (Python)"
+      check "pyenv/fasttext*"                                                 "fasttext (Python)"
+      check "gnome-platform"                                                  "répertoire montage content snap"
+      echo "--- $ok OK / $fail manquant(s) ---"
+      if [ $fail -gt 0 ]; then
+        echo "❌ Build interrompu : $fail dépendance(s) manquante(s)"
+        exit 1
+      fi

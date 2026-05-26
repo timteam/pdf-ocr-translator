@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:file_picker/file_picker.dart';
@@ -27,8 +28,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _requestPermissions() async {
-    await Permission.storage.request();
-    await Permission.photos.request();
+    if (Platform.isAndroid || Platform.isIOS) {
+      await Permission.storage.request();
+      await Permission.photos.request();
+    }
   }
 
   Future<void> _pickPDFFile() async {
