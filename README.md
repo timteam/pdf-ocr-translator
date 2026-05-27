@@ -186,13 +186,15 @@ La connexion au content snap GTK3 (`gnome-46-2404`) est établie automatiquement
 |---|---|---|
 | Flutter SDK | voir ci-dessous | compiler l'application |
 | `build-essential`, `cmake`, `ninja-build`, `clang`, `pkg-config`, `libgtk-3-dev` | `apt install` | toolchain de build Flutter Linux |
+| `libglycin-2-0` | `apt install` | chargeur d'images GNOME 46 — bundlé automatiquement dans le snap par `build-snap.sh` (Ubuntu 26.04 uniquement) |
 | Snapcraft | `snap install snapcraft --classic` | packager le snap |
 | `gnome-46-2404` | `snap install gnome-46-2404` | content snap GTK3 (runtime + build) |
 
 ```bash
 # Toolchain Flutter Linux
 sudo apt update && sudo apt install \
-  build-essential cmake ninja-build clang pkg-config libgtk-3-dev
+  build-essential cmake ninja-build clang pkg-config libgtk-3-dev \
+  libglycin-2-0
 
 # Flutter SDK
 git clone https://github.com/flutter/flutter.git -b stable ~/flutter

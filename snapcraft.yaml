@@ -92,6 +92,9 @@ parts:
     stage-packages:
       - libegl1       # GLVND wrapper : libEGL.so.1, interface générique EGL
       - libegl-mesa0  # driver Mesa EGL : libEGL_mesa.so.0 + ICD 50_mesa.json
+      - libgles2      # GLVND wrapper GLES2 : libGLESv2.so.2 (dlopen par Flutter)
+      - libgl1        # GLVND wrapper OpenGL : libGL.so.1 (dlopen par GTK3)
+                      # tire libglx0 + libglx-mesa0 en deps → stack GLX X11 complète
 
   # Wayland + libs bas niveau requises par GTK3 / Flutter.
   # Non fournies par core24 ni par le content snap gnome-46-2404.
@@ -220,8 +223,10 @@ parts:
       check "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0*"               "libwayland-cursor.so.0 (Wayland)"
       check "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0*"                    "libxkbcommon.so.0 (clavier Wayland)"
       check "usr/lib/x86_64-linux-gnu/libglycin-2.so.0*"                     "libglycin-2.so.0 (chargeur images GNOME 46)"
-      check "usr/lib/x86_64-linux-gnu/libEGL.so.1*"                          "libEGL.so.1 (GLVND)"
+      check "usr/lib/x86_64-linux-gnu/libEGL.so.1*"                           "libEGL.so.1 (GLVND)"
       check "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0*"                     "libEGL_mesa.so.0 (Mesa EGL)"
+      check "usr/lib/x86_64-linux-gnu/libGLESv2.so.2*"                       "libGLESv2.so.2 (GLES2 renderer Flutter)"
+      check "usr/lib/x86_64-linux-gnu/libGL.so.1*"                           "libGL.so.1 (OpenGL GTK3)"
       check "usr/share/glvnd/egl_vendor.d/50_mesa.json"                      "EGL ICD (50_mesa.json)"
       check "usr/lib/x86_64-linux-gnu/libgomp.so*"                           "libgomp (OpenMP)"
       check "pyenv/paddleocr*"                                                "paddleocr (Python)"
