@@ -35,7 +35,7 @@ plugs:
 
 apps:
   pdf-ocr-translator:
-    command: pdf_ocr_translator
+    command: bin/launcher
     plugs:
       - home             # lecture/écriture des PDF dans ~/
       - network          # téléchargement des modèles Opus-MT au premier lancement
@@ -58,6 +58,15 @@ apps:
       __EGL_VENDOR_LIBRARY_DIRS: $SNAP/usr/share/glvnd/egl_vendor.d
 
 parts:
+  # Script de lancement : patche le loaders.cache de gnome-46-2404 pour
+  # corriger les chemins absolus GDK-Pixbuf (/usr/lib → $SNAP/gnome-platform/usr/lib).
+  launcher:
+    plugin: dump
+    source: snap-launcher
+    source-type: local
+    organize:
+      'launcher': bin/launcher
+
   flutter-app:
     plugin: dump
     source: ./flutter_app/build/linux/x64/release/bundle
@@ -173,6 +182,7 @@ parts:
   verify-runtime-deps:
     plugin: nil
     after:
+      - launcher
       - flutter-app
       - gnome-platform-dir
       - egl-runtime
@@ -196,6 +206,7 @@ parts:
       }
 
       echo "--- Vérification des dépendances runtime ---"
+      check "bin/launcher"                                                    "script de lancement (GDK-Pixbuf patch)"
       check "pdf_ocr_translator"                                              "binaire Flutter"
       check "lib/libflutter_linux_gtk.so"                                     "Flutter GTK engine"
       check "usr/bin/pdftoppm"                                                "pdftoppm (poppler)"
