@@ -95,7 +95,17 @@ parts:
       - libxkbcommon0       # gestion clavier Wayland (XKB)
       - libdbus-1-3         # D-Bus : communication avec les services desktop
       - libffi8             # FFI : appels de fonctions dynamiques (dep de GLib)
-      - libglycin-2-0       # chargeur d'images GNOME 46 (GDK-Pixbuf) — absent de gnome-46-2404
+
+  # libglycin-2 : chargeur d'images GNOME 46 requis par libflutter_linux_gtk.so.
+  # Absent des dépôts Ubuntu 24.04 (core24) — bundlé depuis le host Ubuntu 26.04.
+  # build-snap.sh copie la lib dans libs/ avant d'invoquer snapcraft.
+  # Ses dépendances transitives (GLib, GIO, lcms2…) sont toutes dans gnome-46-2404.
+  glycin-runtime:
+    plugin: dump
+    source: libs
+    source-type: local
+    organize:
+      'libglycin-2.so.0': usr/lib/x86_64-linux-gnu/libglycin-2.so.0
 
   # X11 client libs requises par libflutter_linux_gtk.so → GTK3 → X11 stack.
   # Le content snap gnome-46-2404 fournit GTK3 mais pas ces libs bas niveau.
@@ -167,6 +177,7 @@ parts:
       - gnome-platform-dir
       - egl-runtime
       - wayland-runtime
+      - glycin-runtime
       - x11-runtime
       - poppler
       - python-env

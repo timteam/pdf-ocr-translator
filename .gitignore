@@ -13,6 +13,7 @@ parts/
 prime/
 stage/
 .snapcraft/
+libs/           # libs bundlées depuis le host (générées par build-snap.sh)
 
 # Mobile builds
 builds/

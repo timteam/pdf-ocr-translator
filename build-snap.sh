@@ -88,6 +88,15 @@ fi
 
 cd ..
 
+# ── Libs bundlées depuis le host (absentes des dépôts Ubuntu 24.04/core24) ───
+mkdir -p libs
+GLYCIN=/usr/lib/x86_64-linux-gnu/libglycin-2.so.0
+if [ ! -f "$GLYCIN" ]; then
+  echo -e "${RED}❌ $GLYCIN introuvable — installe : sudo apt install libglycin-2-0${NC}"
+  exit 1
+fi
+cp -f "$GLYCIN" libs/
+
 # ── Snapcraft ────────────────────────────────────────────────────────────────
 echo -e "${YELLOW}🔨 Packaging snap...${NC}"
 
