@@ -1,63 +1,62 @@
 #!/bin/bash
 # Snap Build Script for PDF OCR Translator
-# Builds a Debian snap package for Linux distribution
+#
+# Usage:
+#   ./build-snap.sh           — build incrémental (rapide, recommandé)
+#   ./build-snap.sh --clean   — rebuild complet depuis zéro (lent, ~15 min)
+#                               Obligatoire après modification de stage-packages
 
 set -e
 
-echo "📦 Building PDF OCR Translator Snap Package"
-echo "==========================================="
+CLEAN=false
+for arg in "$@"; do
+  [[ "$arg" == "--clean" ]] && CLEAN=true
+done
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Check if snapcraft is installed
+echo "📦 Building PDF OCR Translator Snap Package"
+echo "==========================================="
+$CLEAN && echo -e "${YELLOW}Mode : rebuild complet (--clean)${NC}" \
+       || echo -e "${BLUE}Mode : build incrémental${NC}"
+
 if ! command -v snapcraft &> /dev/null; then
     echo -e "${RED}❌ Snapcraft is not installed!${NC}"
-    echo -e "${YELLOW}Please install it with:${NC}"
     echo "sudo snap install snapcraft --classic"
     exit 1
 fi
-
 echo -e "${BLUE}✅ Snapcraft found: $(snapcraft --version)${NC}"
 
-# Create build directory
 BUILD_DIR="./snap-builds"
 mkdir -p "$BUILD_DIR"
 
-echo -e "${YELLOW}🔍 Téléchargement/vérification des wheels Python...${NC}"
-# Toujours exécuter le script : il est idempotent (skip les fichiers déjà complets)
-# et s'assure que toutes les dépendances transitives sont présentes.
+# ── Modèle FastText LID (asset Flutter, ~917 KB) ─────────────────────────────
+echo -e "${YELLOW}🔍 Vérification du modèle FastText LID...${NC}"
+./scripts/download_fasttext_model.sh
+
+# ── Wheels Python ────────────────────────────────────────────────────────────
+echo -e "${YELLOW}🔍 Vérification des wheels Python...${NC}"
 ./scripts/download_pip_wheels.sh
 
-echo -e "${YELLOW}🔨 Building Flutter Linux bundle...${NC}"
-echo "This may take several minutes..."
-
-# Ensure host OS is Linux for desktop build
+# ── Flutter build (conditionnel) ─────────────────────────────────────────────
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo -e "${RED}❌ Snap build requires a Linux host.${NC}"
-  echo -e "${YELLOW}Please run this script on Linux, or build the Linux bundle on a Linux machine.${NC}"
   exit 1
 fi
 
-# Build Flutter Linux bundle if necessary
 if ! command -v flutter &> /dev/null; then
     echo -e "${RED}❌ Flutter CLI is not installed!${NC}"
-    echo -e "${YELLOW}Please install Flutter and ensure it is on your PATH.${NC}"
-    echo "https://docs.flutter.dev/get-started/install"
     exit 1
 fi
 
-# Verify Linux build toolchain
 for tool in cmake ninja clang++ pkg-config; do
   if ! command -v "$tool" &> /dev/null; then
     echo -e "${RED}❌ Required build tool missing: $tool${NC}"
-    echo -e "${YELLOW}Install Linux desktop build dependencies before continuing.${NC}"
-    echo "Example (Debian/Ubuntu):"
-    echo "  sudo apt update && sudo apt install build-essential cmake ninja-build clang++ pkg-config libgtk-3-dev"
+    echo "  sudo apt install build-essential cmake ninja-build clang++ pkg-config libgtk-3-dev"
     exit 1
   fi
 done
@@ -65,50 +64,68 @@ done
 cd flutter_app
 
 if [[ ! -d linux ]]; then
-  echo -e "${YELLOW}ℹ️  Linux desktop support is not configured. Generating linux desktop files...${NC}"
   flutter create --platforms=linux .
 fi
 
-flutter clean
-flutter pub get
-flutter build linux --release
+BUNDLE="build/linux/x64/release/bundle/pdf_ocr_translator"
+
+# Rebuild Flutter seulement si des sources Dart/pubspec ont changé depuis
+# le dernier binaire — évite 3-5 min inutiles à chaque build snap.
+NEEDS_FLUTTER_BUILD=false
+if [[ ! -f "$BUNDLE" ]]; then
+  NEEDS_FLUTTER_BUILD=true
+elif find lib pubspec.yaml -newer "$BUNDLE" -print -quit 2>/dev/null | grep -q .; then
+  NEEDS_FLUTTER_BUILD=true
+fi
+
+if $NEEDS_FLUTTER_BUILD; then
+  echo -e "${YELLOW}🔨 Flutter sources modifiées — rebuild...${NC}"
+  flutter pub get
+  flutter build linux --release
+else
+  echo -e "${GREEN}⚡ Flutter bundle à jour — rebuild ignoré${NC}"
+fi
+
 cd ..
 
-echo -e "${YELLOW}🔨 Packaging snap from built bundle...${NC}"
+# ── Snapcraft ────────────────────────────────────────────────────────────────
+echo -e "${YELLOW}🔨 Packaging snap...${NC}"
 
-# Mode managé (LXD/Multipass) : snapcraft crée un container Ubuntu 24.04 et le
-# réutilise entre les builds — les packages apt sont cachés dans ce container.
-echo "This may take several minutes (plus long on first run while container is created)..."
+# --clean : nettoie tout le state snapcraft (parts/stage/prime).
+# Nécessaire après modification de stage-packages pour éviter un prime
+# incohérent. En build incrémental, snapcraft détecte les changements seul.
+if $CLEAN; then
+  echo "Nettoyage du state snapcraft..."
+  snapcraft clean
+fi
 
-# Build the snap
+# Hash de snapcraft.yaml pour détecter automatiquement un changement de
+# stage-packages et avertir l'utilisateur s'il n'a pas passé --clean.
+HASH_FILE=".snapcraft_yaml_hash"
+CURRENT_HASH=$(sha256sum snapcraft.yaml | cut -d' ' -f1)
+if [[ -f "$HASH_FILE" ]]; then
+  PREV_HASH=$(cat "$HASH_FILE")
+  if [[ "$CURRENT_HASH" != "$PREV_HASH" ]] && ! $CLEAN; then
+    echo -e "${YELLOW}⚠️  snapcraft.yaml a changé depuis le dernier build.${NC}"
+    echo -e "${YELLOW}   Si tu as modifié des stage-packages, relance avec --clean.${NC}"
+  fi
+fi
+
 if snapcraft pack; then
+    echo "$CURRENT_HASH" > "$HASH_FILE"
     echo -e "${GREEN}✅ Snap build completed successfully!${NC}"
 
-    # List generated files
-    echo ""
-    echo -e "${BLUE}📦 Generated snap files:${NC}"
-    ls -la *.snap 2>/dev/null || echo "No .snap files found in current directory"
-
-    # Move snap to build directory if it exists
     if ls *.snap 1> /dev/null 2>&1; then
         mv *.snap "$BUILD_DIR/" 2>/dev/null || true
-        echo ""
         echo -e "${GREEN}📁 Snap moved to: $BUILD_DIR${NC}"
         ls -la "$BUILD_DIR/"
     fi
 
     echo ""
-    echo -e "${GREEN}🎉 Snap package ready for distribution!${NC}"
-    echo ""
-    echo -e "${BLUE}📋 Installation instructions:${NC}"
-    echo "sudo snap install $BUILD_DIR/*.snap --dangerous"
-    echo ""
-    echo -e "${BLUE}📋 Publishing to Snap Store:${NC}"
-    echo "snapcraft login"
-    echo "snapcraft upload $BUILD_DIR/*.snap"
-
+    echo -e "${GREEN}🎉 Snap package ready!${NC}"
+    echo -e "${BLUE}Installation :${NC} sudo snap install $BUILD_DIR/*.snap --dangerous"
+    echo -e "${BLUE}Connexion    :${NC} sudo snap connect pdf-ocr-translator:gnome-46-2404 gnome-46-2404:gnome-46-2404"
 else
     echo -e "${RED}❌ Snap build failed!${NC}"
-    echo -e "${YELLOW}Check the error messages above for details.${NC}"
     exit 1
 fi

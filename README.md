@@ -120,7 +120,7 @@ pdf-ocr-translator/
 ├── scripts/
 │   ├── download_fasttext_model.sh       # Télécharge lid.176.ftz (Meta / HuggingFace)
 │   └── download_pip_wheels.sh           # Télécharge les wheels Python pour le snap
-├── snapcraft.yaml                       # Snap (core26, confinement strict)
+├── snapcraft.yaml                       # Snap (core24, confinement strict)
 ├── build-snap.sh                        # Script de build complet
 └── README.md
 ```
@@ -165,97 +165,96 @@ La détection de langue est automatique. Les modèles de traduction Opus-MT sont
 
 ---
 
-## Prérequis de build
+## Installation (utilisateur final)
 
-### Linux desktop
+Le snap est autonome : Python, PaddleOCR, FastText, CTranslate2 et poppler-utils sont **bundlés**. Aucune dépendance à installer manuellement.
 
 ```bash
-sudo apt update
-sudo apt install \
-  build-essential cmake ninja-build clang pkg-config \
-  libgtk-3-dev libglib2.0-dev liblzma-dev \
-  poppler-utils \
-  python3 python3-pip
-
-pip3 install paddlepaddle paddleocr ctranslate2 sentencepiece fasttext-wheel
+sudo snap install pdf-ocr-translator   # depuis le Snap Store (à venir)
+snap run pdf-ocr-translator
 ```
 
-Flutter SDK :
+La connexion au content snap GTK3 (`gnome-46-2404`) est établie automatiquement par le Snap Store.
+
+---
+
+## Build depuis les sources
+
+### Ce dont tu as besoin sur ta machine
+
+| Outil | Installation | Rôle |
+|---|---|---|
+| Flutter SDK | voir ci-dessous | compiler l'application |
+| `build-essential`, `cmake`, `ninja-build`, `clang`, `pkg-config`, `libgtk-3-dev` | `apt install` | toolchain de build Flutter Linux |
+| Snapcraft | `snap install snapcraft --classic` | packager le snap |
+| `gnome-46-2404` | `snap install gnome-46-2404` | content snap GTK3 (runtime + build) |
 
 ```bash
+# Toolchain Flutter Linux
+sudo apt update && sudo apt install \
+  build-essential cmake ninja-build clang pkg-config libgtk-3-dev
+
+# Flutter SDK
 git clone https://github.com/flutter/flutter.git -b stable ~/flutter
 export PATH="$HOME/flutter/bin:$PATH"
 flutter doctor
 flutter config --enable-linux-desktop
-```
 
-### Snap
-
-```bash
+# Snapcraft
 sudo snap install snapcraft --classic
+sudo snap install gnome-46-2404
 ```
 
-> En production (snap), `poppler-utils`, `python3` et l'environnement Python (PaddleOCR, FastText, CTranslate2…) sont bundlés. L'utilisateur final n'installe que le snap.
+> Pas besoin d'installer Python, PaddleOCR ou poppler-utils : ils sont téléchargés et
+> bundlés automatiquement dans le snap lors du build.
 
----
-
-## Procédure de build
-
-### 1. Dépendances Flutter
+### Premier build (après clonage)
 
 ```bash
-cd flutter_app
-flutter pub get
-```
+# Installer les dépendances Flutter
+cd flutter_app && flutter pub get && cd ..
 
-### 2. Modèle FastText (une seule fois)
-
-```bash
-bash scripts/download_fasttext_model.sh
-```
-
-Télécharge `lid.176.ftz` (~900 KB) dans `flutter_app/assets/models/`. Essaie d'abord le CDN Meta, puis HuggingFace en fallback.
-
-### 3. Mode développement
-
-```bash
-cd flutter_app
-flutter run -d linux
-```
-
-### 4. Build Linux release
-
-```bash
-cd flutter_app
-flutter build linux --release
-```
-
-Binaire produit dans :
-```
-flutter_app/build/linux/x64/release/bundle/pdf_ocr_translator
-```
-
-### 5. Build Snap
-
-Avant le premier build snap, télécharger les wheels Python sur la machine hôte (les builds LXC n'ont pas toujours accès au réseau) :
-
-```bash
-bash scripts/download_pip_wheels.sh
-```
-
-Puis lancer le build :
-
-```bash
+# Lancer le build complet
 bash build-snap.sh
 ```
 
-Le script compile le bundle Flutter, copie les wheels dans `wheels/`, puis lance `snapcraft` qui bundle Python, PaddleOCR, FastText, CTranslate2 et poppler-utils.
+`build-snap.sh` orchestre automatiquement :
+1. Téléchargement du modèle FastText LID (`lid.176.ftz`, ~900 KB) si absent
+2. Téléchargement des wheels Python si absentes (`paddlepaddle` ~185 MB + dépendances)
+3. Build Flutter Linux release (ignoré si les sources `.dart` n'ont pas changé)
+4. Build snapcraft incrémental (seules les parties modifiées sont reconstruites)
 
-### 6. Installation locale du snap
+Le premier build prend **20–30 min** (téléchargements + compilation). Les suivants sont bien plus rapides.
+
+### Builds suivants
 
 ```bash
-sudo snap install ./snap-builds/pdf-ocr-translator_*.snap --dangerous
-pdf-ocr-translator
+bash build-snap.sh          # build incrémental — ~3–5 min
+bash build-snap.sh --clean  # rebuild complet depuis zéro — ~15 min
+```
+
+`--clean` est nécessaire uniquement après avoir modifié des `stage-packages` dans `snapcraft.yaml`. Si le fichier a changé sans `--clean`, le script affiche un avertissement.
+
+### Installation et test du snap produit (développement)
+
+```bash
+bash install-local.sh
+snap run pdf-ocr-translator
+```
+
+`install-local.sh` installe le snap et établit manuellement la connexion au content snap GTK3 (`gnome-46-2404`). Cette étape est nécessaire en local car l'installation avec `--dangerous` (fichier local) bypass le Snap Store, qui établit normalement cette connexion automatiquement. En production (Snap Store), aucune commande supplémentaire n'est requise.
+
+### Mode développement Flutter (sans snap)
+
+Pour itérer rapidement sur l'interface sans passer par snapcraft :
+
+```bash
+# Prérequis supplémentaires (non nécessaires pour le build snap)
+sudo apt install poppler-utils python3-pip
+pip3 install paddlepaddle paddleocr ctranslate2 sentencepiece fasttext-wheel
+
+cd flutter_app
+flutter run -d linux
 ```
 
 ---

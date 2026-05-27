@@ -100,3 +100,4 @@ translations_cache/
 models/
 *.deb
 *.rpm
+.snapcraft_yaml_hash

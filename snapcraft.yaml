@@ -37,16 +37,16 @@ apps:
   pdf-ocr-translator:
     command: pdf_ocr_translator
     plugs:
-      - home
-      - network
-      - desktop
-      - desktop-legacy
-      - gsettings
-      - opengl
-      - wayland
-      - x11
-      - removable-media
-      - gnome-46-2404
+      - home             # lecture/écriture des PDF dans ~/
+      - network          # téléchargement des modèles Opus-MT au premier lancement
+      - desktop          # intégration bureau (fenêtre, icône)
+      - desktop-legacy   # compatibilité GTK3 a11y / ibus
+      - gsettings        # thème, polices et préférences GNOME
+      - opengl           # accès GPU pour le rendu Flutter
+      - wayland          # protocole Wayland (compositeur moderne)
+      - x11              # fallback X11 / XWayland
+      - removable-media  # accès disques amovibles et montages externes
+      - gnome-46-2404    # content snap : GTK3 + GDK-Pixbuf + libepoxy
     environment:
       PYTHONPATH: $SNAP/pyenv
       # GTK3 / GDK-Pixbuf / libepoxy viennent du content snap monté à runtime
@@ -81,16 +81,38 @@ parts:
   egl-runtime:
     plugin: nil
     stage-packages:
-      - libegl1
-      - libegl-mesa0
+      - libegl1       # GLVND wrapper : libEGL.so.1, interface générique EGL
+      - libegl-mesa0  # driver Mesa EGL : libEGL_mesa.so.0 + ICD 50_mesa.json
+
+  # X11 client libs requises par libflutter_linux_gtk.so → GTK3 → X11 stack.
+  # Le content snap gnome-46-2404 fournit GTK3 mais pas ces libs bas niveau.
+  x11-runtime:
+    plugin: nil
+    stage-packages:
+      - libx11-6       # client X11 de base (connexion au serveur X)
+      - libxext6       # extensions X11 (XSHM, double-buffer…)
+      - libxi6         # X Input : souris, tablette, multitouch
+      - libxfixes3     # XFixes : régions d'écran, curseurs composites
+      - libxcursor1    # thèmes de curseur X (PNG)
+      - libxdamage1    # XDamage : notification des zones modifiées
+      - libxcomposite1 # XComposite : rendu hors-écran (transparence)
+      - libxrandr2     # XRandR : multi-écrans, résolution dynamique
+      - libxinerama1   # Xinerama : multi-moniteurs (ancienne API)
+      - libxrender1    # XRender : rendu anti-aliasé côté serveur X
+      - libxres1       # XRes : statistiques ressources X (debug)
+      - libxcb1        # XCB : binding C bas niveau du protocole X
+      - libxcb-render0 # XCB – extension XRender
+      - libxcb-shm0    # XCB – mémoire partagée X (SHM)
+      - libxau6        # authentification X (MIT-MAGIC-COOKIE)
+      - libxdmcp6      # XDMCP : protocole Display Manager Control
 
   # Outils PDF : pdftoppm (rendu page), pdfinfo (comptage), pdftotext
   # curl : téléchargement des modèles Opus-MT depuis HuggingFace au runtime
   poppler:
     plugin: nil
     stage-packages:
-      - poppler-utils
-      - curl
+      - poppler-utils  # pdftoppm (rendu), pdfinfo (comptage), pdftotext, pdfunite
+      - curl           # téléchargement des modèles Opus-MT depuis HuggingFace
 
   # Python + libs de calcul pour PaddleOCR/FastText/CTranslate2
   python-env:
@@ -98,14 +120,18 @@ parts:
     source: wheels
     source-type: local
     build-packages:
-      - python3
-      - python3-pip
+      - python3      # interpréteur Python 3 pour pip au moment du build
+      - python3-pip  # pip pour installer les wheels dans pyenv/
     stage-packages:
-      - python3
-      - libgomp1
-      - libopenblas0
+      - python3    # interpréteur Python 3 au runtime (subprocess OCR/FastText)
+      - libgomp1   # runtime OpenMP requis par les extensions C de PaddleOCR
     override-build: |
       set -e
+      # paddlepaddle  : framework deep learning (moteur PaddleOCR)
+      # paddleocr     : OCR — détection + reconnaissance de texte
+      # ctranslate2   : runtime Opus-MT (inférence traduction offline)
+      # sentencepiece : tokenizer pré/post-traitement Opus-MT
+      # fasttext-wheel: détection de langue FastText LID (176 langues)
       pip3 install \
         --no-cache-dir \
         --break-system-packages \
@@ -127,6 +153,7 @@ parts:
       - flutter-app
       - gnome-platform-dir
       - egl-runtime
+      - x11-runtime
       - poppler
       - python-env
     override-prime: |
@@ -151,12 +178,12 @@ parts:
       check "usr/bin/pdftotext"                                               "pdftotext (texte embarqué)"
       check "usr/bin/pdfunite"                                                "pdfunite (assemblage PDF)"
       check "usr/bin/curl"                                                    "curl"
-      check "usr/bin/python3*"                                                "python3"
+      check "usr/lib/x86_64-linux-gnu/libXfixes.so.3*"                        "libXfixes.so.3 (X11)"
+      check "usr/lib/x86_64-linux-gnu/libX11.so.6*"                          "libX11.so.6 (X11)"
       check "usr/lib/x86_64-linux-gnu/libEGL.so.1*"                          "libEGL.so.1 (GLVND)"
       check "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0*"                     "libEGL_mesa.so.0 (Mesa EGL)"
       check "usr/share/glvnd/egl_vendor.d/50_mesa.json"                      "EGL ICD (50_mesa.json)"
       check "usr/lib/x86_64-linux-gnu/libgomp.so*"                           "libgomp (OpenMP)"
-      check "usr/lib/x86_64-linux-gnu/libopenblas*"                          "libopenblas"
       check "pyenv/paddleocr*"                                                "paddleocr (Python)"
       check "pyenv/paddlepaddle*"                                             "paddlepaddle (Python)"
       check "pyenv/ctranslate2*"                                              "ctranslate2 (Python)"

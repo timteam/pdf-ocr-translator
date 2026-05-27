@@ -49,48 +49,67 @@ echo ""
 
 # ---------------------------------------------------------------------------
 # paddlepaddle : ~185 MB — pip download ne supporte pas la reprise partielle.
-# On résout l'URL et le SHA256 via l'API PyPI, puis on télécharge avec
-# curl -C - (resume HTTP Range) avec retry automatique.
+# Version épinglée pour garantir la reproductibilité des builds.
+# On résout l'URL et le SHA256 via l'API PyPI (version fixe), puis on
+# télécharge avec curl -C - (resume HTTP Range) avec retry automatique.
+# Pour mettre à jour : changer PADDLE_VERSION et supprimer le wheel existant.
 # ---------------------------------------------------------------------------
-echo "→ Résolution de paddlepaddle via l'API PyPI..."
+PADDLE_VERSION="3.3.1"
 
-read -r PADDLE_URL PADDLE_SIZE PADDLE_SHA256 PADDLE_FILE_NAME <<< "$(python3 - <<'EOF'
+# Si un wheel complet pour cette version est déjà présent, on saute la
+# résolution réseau et le téléchargement.
+EXISTING=$(ls "$WHEELS_DIR"/paddlepaddle-${PADDLE_VERSION}-cp312-*x86_64*.whl 2>/dev/null | head -1)
+if [ -n "$EXISTING" ]; then
+  echo "   ✅ paddlepaddle ${PADDLE_VERSION} déjà présent : $(basename "$EXISTING")"
+else
+  echo "→ Résolution de paddlepaddle ${PADDLE_VERSION} via l'API PyPI..."
+
+  read -r PADDLE_URL PADDLE_SIZE PADDLE_SHA256 PADDLE_FILE_NAME <<< "$(python3 - <<EOF
 import sys, json
 try:
     from urllib.request import urlopen
-    with urlopen("https://pypi.org/pypi/paddlepaddle/json") as r:
+    with urlopen("https://pypi.org/pypi/paddlepaddle/${PADDLE_VERSION}/json") as r:
         d = json.load(r)
-except Exception:
+except Exception as e:
+    print(f"Erreur API PyPI: {e}", file=sys.stderr)
     sys.exit(1)
-version = d["info"]["version"]
-files = d["releases"].get(version, [])
+files = d.get("urls", [])
 wheel = next(
     (f for f in files if "cp312" in f["filename"] and "x86_64" in f["filename"]),
     None,
 )
 if not wheel:
+    print("Aucun wheel cp312/x86_64 trouvé", file=sys.stderr)
     sys.exit(1)
 print(wheel["url"], wheel.get("size", 0), wheel["digests"]["sha256"], wheel["filename"])
 EOF
 )"
 
-if [ -z "$PADDLE_URL" ]; then
-  echo "❌ Impossible de résoudre l'URL paddlepaddle depuis PyPI."
-  exit 1
-fi
+  if [ -z "$PADDLE_URL" ]; then
+    echo "❌ Impossible de résoudre l'URL paddlepaddle ${PADDLE_VERSION} depuis PyPI."
+    exit 1
+  fi
 
-PADDLE_DEST="$WHEELS_DIR/$PADDLE_FILE_NAME"
-echo "   URL   : $PADDLE_URL"
-echo "   SHA256: $PADDLE_SHA256"
-echo "   Taille: $(( PADDLE_SIZE / 1048576 )) MB"
+  PADDLE_DEST="$WHEELS_DIR/$PADDLE_FILE_NAME"
+  echo "   URL   : $PADDLE_URL"
+  echo "   SHA256: $PADDLE_SHA256"
+  echo "   Taille: $(( PADDLE_SIZE / 1048576 )) MB"
 
-if [ -f "$PADDLE_DEST" ] && [ "$PADDLE_SIZE" -gt 0 ]; then
-  ACTUAL_SIZE=$(wc -c < "$PADDLE_DEST")
-  if [ "$ACTUAL_SIZE" -eq "$PADDLE_SIZE" ]; then
-    echo "   Fichier complet, vérification de l'intégrité..."
-    sha256_verify "$PADDLE_DEST" "$PADDLE_SHA256" "paddlepaddle"
+  if [ -f "$PADDLE_DEST" ] && [ "$PADDLE_SIZE" -gt 0 ]; then
+    ACTUAL_SIZE=$(wc -c < "$PADDLE_DEST")
+    if [ "$ACTUAL_SIZE" -eq "$PADDLE_SIZE" ]; then
+      echo "   Fichier complet, vérification de l'intégrité..."
+      sha256_verify "$PADDLE_DEST" "$PADDLE_SHA256" "paddlepaddle"
+    else
+      echo "   Fichier partiel ($(( ACTUAL_SIZE / 1048576 )) MB / $(( PADDLE_SIZE / 1048576 )) MB), reprise..."
+      curl -C - \
+        --retry 15 --retry-delay 15 --retry-all-errors \
+        --connect-timeout 30 \
+        -L --progress-bar \
+        -o "$PADDLE_DEST" "$PADDLE_URL"
+      sha256_verify "$PADDLE_DEST" "$PADDLE_SHA256" "paddlepaddle"
+    fi
   else
-    echo "   Fichier partiel ($(( ACTUAL_SIZE / 1048576 )) MB / $(( PADDLE_SIZE / 1048576 )) MB), reprise..."
     curl -C - \
       --retry 15 --retry-delay 15 --retry-all-errors \
       --connect-timeout 30 \
@@ -98,13 +117,6 @@ if [ -f "$PADDLE_DEST" ] && [ "$PADDLE_SIZE" -gt 0 ]; then
       -o "$PADDLE_DEST" "$PADDLE_URL"
     sha256_verify "$PADDLE_DEST" "$PADDLE_SHA256" "paddlepaddle"
   fi
-else
-  curl -C - \
-    --retry 15 --retry-delay 15 --retry-all-errors \
-    --connect-timeout 30 \
-    -L --progress-bar \
-    -o "$PADDLE_DEST" "$PADDLE_URL"
-  sha256_verify "$PADDLE_DEST" "$PADDLE_SHA256" "paddlepaddle"
 fi
 
 echo ""
