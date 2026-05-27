@@ -84,6 +84,19 @@ parts:
       - libegl1       # GLVND wrapper : libEGL.so.1, interface générique EGL
       - libegl-mesa0  # driver Mesa EGL : libEGL_mesa.so.0 + ICD 50_mesa.json
 
+  # Wayland + libs bas niveau requises par GTK3 / Flutter.
+  # Non fournies par core24 ni par le content snap gnome-46-2404.
+  wayland-runtime:
+    plugin: nil
+    stage-packages:
+      - libwayland-client0  # protocole Wayland (connexion au compositeur)
+      - libwayland-cursor0  # curseurs Wayland (thèmes, animations)
+      - libwayland-egl1     # bridge Wayland-EGL pour le rendu GPU
+      - libxkbcommon0       # gestion clavier Wayland (XKB)
+      - libdbus-1-3         # D-Bus : communication avec les services desktop
+      - libffi8             # FFI : appels de fonctions dynamiques (dep de GLib)
+      - libglycin-2-0       # chargeur d'images GNOME 46 (GDK-Pixbuf) — absent de gnome-46-2404
+
   # X11 client libs requises par libflutter_linux_gtk.so → GTK3 → X11 stack.
   # Le content snap gnome-46-2404 fournit GTK3 mais pas ces libs bas niveau.
   x11-runtime:
@@ -153,6 +166,7 @@ parts:
       - flutter-app
       - gnome-platform-dir
       - egl-runtime
+      - wayland-runtime
       - x11-runtime
       - poppler
       - python-env
@@ -180,6 +194,10 @@ parts:
       check "usr/bin/curl"                                                    "curl"
       check "usr/lib/x86_64-linux-gnu/libXfixes.so.3*"                        "libXfixes.so.3 (X11)"
       check "usr/lib/x86_64-linux-gnu/libX11.so.6*"                          "libX11.so.6 (X11)"
+      check "usr/lib/x86_64-linux-gnu/libwayland-client.so.0*"               "libwayland-client.so.0 (Wayland)"
+      check "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0*"               "libwayland-cursor.so.0 (Wayland)"
+      check "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0*"                    "libxkbcommon.so.0 (clavier Wayland)"
+      check "usr/lib/x86_64-linux-gnu/libglycin-2.so.0*"                     "libglycin-2.so.0 (chargeur images GNOME 46)"
       check "usr/lib/x86_64-linux-gnu/libEGL.so.1*"                          "libEGL.so.1 (GLVND)"
       check "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0*"                     "libEGL_mesa.so.0 (Mesa EGL)"
       check "usr/share/glvnd/egl_vendor.d/50_mesa.json"                      "EGL ICD (50_mesa.json)"
