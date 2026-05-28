@@ -10,10 +10,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'app_logger.dart';
 
-/// Construit l'environnement à passer aux sous-processus Python.
+/// Construit l'environnement à passer aux sous-processus Python 3.12.
 ///
 /// Priorité :
-///   1. $SNAP/pyenv  — contexte snap (PYTHONPATH déjà défini par le snap runtime)
+///   1. $SNAP/pyenv  — contexte snap (PYTHONPATH + LD_LIBRARY_PATH déjà définis)
 ///   2. <exe_dir>/pyenv — bundle extrait ou run hors-snap depuis le répertoire snap
 ///   3. Environnement hérité inchangé — Python système ou venv activé manuellement
 Map<String, String> _buildPythonEnv() {
@@ -22,9 +22,28 @@ Map<String, String> _buildPythonEnv() {
 
   final exeDir = p.dirname(Platform.resolvedExecutable);
   final localPyenv = p.join(exeDir, 'pyenv');
-  if (Directory(localPyenv).existsSync()) {
-    env['PYTHONPATH'] = localPyenv;
+  if (!Directory(localPyenv).existsSync()) return env;
+
+  env['PYTHONPATH'] = localPyenv;
+
+  // Les wheels Python (paddle, numpy, opencv…) bundlent leurs libs C sans
+  // RUNPATH — elles nécessitent que leurs répertoires *.libs soient dans
+  // LD_LIBRARY_PATH pour que le dynamic linker les trouve au runtime.
+  final wheelLibDirs = [
+    p.join(localPyenv, 'paddle', 'libs'),
+    p.join(localPyenv, 'numpy.libs'),
+    p.join(localPyenv, 'opencv_contrib_python.libs'),
+    p.join(localPyenv, 'ctranslate2.libs'),
+    p.join(localPyenv, 'pillow.libs'),
+    p.join(localPyenv, 'shapely.libs'),
+  ].where((d) => Directory(d).existsSync()).join(':');
+
+  if (wheelLibDirs.isNotEmpty) {
+    final existing = env['LD_LIBRARY_PATH'] ?? '';
+    env['LD_LIBRARY_PATH'] =
+        existing.isEmpty ? wheelLibDirs : '$wheelLibDirs:$existing';
   }
+
   return env;
 }
 
@@ -207,9 +226,9 @@ class OCRService {
   static Future<void> initPaddleOCR() async {
     try {
       final appDir = await getApplicationSupportDirectory();
-      final scriptPath = p.join(appDir.path, 'paddleocr.py');
+      final scriptPath = p.join(appDir.path, 'paddle_runner.py');
       // Toujours réécrire pour refléter la version embarquée dans l'app
-      final src = await rootBundle.loadString('assets/scripts/paddleocr.py');
+      final src = await rootBundle.loadString('assets/scripts/paddle_runner.py');
       await File(scriptPath).writeAsString(src);
       _ocrScriptPath = scriptPath;
     } catch (e) {
@@ -357,7 +376,7 @@ class OCRService {
     if (_ocrScriptPath == null) throw Exception('Script PaddleOCR non initialisé.');
 
     final process = await Process.start(
-      'python3', [_ocrScriptPath!, 'ocr', imageFile.path, language],
+      'python3.12', [_ocrScriptPath!, 'ocr', imageFile.path, language],
       environment: _buildPythonEnv(),
     );
 
@@ -370,7 +389,7 @@ class OCRService {
 
     final output = await stdoutFuture;
     final exitCode = await process.exitCode;
-    if (exitCode != 0) throw Exception('paddleocr.py ocr: exit $exitCode');
+    if (exitCode != 0) throw Exception('paddle_runner.py ocr: exit $exitCode');
 
     final decoded = json.decode(output) as List;
     return decoded.map((b) {
@@ -391,7 +410,7 @@ class OCRService {
     if (_ocrScriptPath == null) throw Exception('Script PaddleOCR non initialisé.');
 
     final process = await Process.start(
-      'python3', [_ocrScriptPath!, 'detect', imageFile.path],
+      'python3.12', [_ocrScriptPath!, 'detect', imageFile.path],
       environment: _buildPythonEnv(),
     );
 
@@ -457,7 +476,7 @@ class OCRService {
     if (snippet.isEmpty) return 'en';
 
     final process = await Process.start(
-      'python3', [_fastTextScriptPath!, _fastTextModelPath!],
+      'python3.12', [_fastTextScriptPath!, _fastTextModelPath!],
       environment: _buildPythonEnv(),
     );
     process.stdin.writeln(snippet);

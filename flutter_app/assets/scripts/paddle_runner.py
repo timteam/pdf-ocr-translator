@@ -41,11 +41,8 @@ def import_paddleocr():
     try:
         from paddleocr import PaddleOCR
         return PaddleOCR
-    except ImportError:
-        sys.exit(
-            "paddleocr non installé.\n"
-            "Installer : pip install paddleocr paddlepaddle-cpu"
-        )
+    except Exception as e:
+        sys.exit(f"paddleocr import failed: {e}")
 
 
 def make_ocr(lang):

@@ -51,7 +51,8 @@ apps:
       PYTHONPATH: $SNAP/pyenv
       # GTK3 / GDK-Pixbuf / libepoxy viennent du content snap monté à runtime
       SNAP_DESKTOP_RUNTIME: $SNAP/gnome-platform
-      LD_LIBRARY_PATH: $SNAP/gnome-platform/lib/x86_64-linux-gnu:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      # Libs vendorées par les wheels Python (sans RUNPATH — nécessitent LD_LIBRARY_PATH)
+      LD_LIBRARY_PATH: $SNAP/pyenv/paddle/libs:$SNAP/pyenv/numpy.libs:$SNAP/pyenv/opencv_contrib_python.libs:$SNAP/pyenv/ctranslate2.libs:$SNAP/pyenv/pillow.libs:$SNAP/pyenv/shapely.libs:$SNAP/gnome-platform/lib/x86_64-linux-gnu:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
       XDG_DATA_DIRS: $SNAP/gnome-platform/usr/share:$SNAP/usr/share:$XDG_DATA_DIRS
       GDK_PIXBUF_MODULE_FILE: $SNAP/gnome-platform/usr/lib/x86_64-linux-gnu/gdk-pixbuf-current/loaders.cache
       # EGL : libEGL.so.1 (GLVND) trouve libEGL_mesa.so.0 via les ICD stagés
@@ -158,8 +159,9 @@ parts:
       - python3      # interpréteur Python 3 pour pip au moment du build
       - python3-pip  # pip pour installer les wheels dans pyenv/
     stage-packages:
-      - python3    # interpréteur Python 3 au runtime (subprocess OCR/FastText)
-      - libgomp1   # runtime OpenMP requis par les extensions C de PaddleOCR
+      - python3.12          # interpréteur Python 3.12 au runtime — même version que les wheels .cpython-312
+      - libpython3.12-stdlib # stdlib complète (json, os, subprocess… requis par paddleocr)
+      - libgomp1             # runtime OpenMP requis par les extensions C de PaddleOCR
     override-build: |
       set -e
       # paddlepaddle  : framework deep learning (moteur PaddleOCR)
