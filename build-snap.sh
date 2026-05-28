@@ -126,11 +126,12 @@ if $CLEAN; then
     SNAPCRAFT_OK=true
   fi
 else
-  # Build incrémental : snapcraft pack ne rebuild pas les parts.
-  # On re-prime explicitement flutter-app pour que le bundle Flutter frais
-  # (issu du flutter build précédent) soit copié dans prime/ avant le packaging.
-  echo -e "${YELLOW}🔄 Synchronisation bundle Flutter → prime/...${NC}"
-  snapcraft prime flutter-app
+  # Build incrémental : snapcraft pack exécute le pipeline complet MAIS saute
+  # les parts dont les state files sont intacts. Il faut nettoyer flutter-app
+  # pour invalider ses state files — snapcraft pack re-traite ensuite cette
+  # seule part (pull→build→stage→prime) puis pack le tout.
+  echo -e "${YELLOW}🔄 Invalidation du cache flutter-app...${NC}"
+  snapcraft clean flutter-app
   echo -e "${YELLOW}🔨 Packaging snap...${NC}"
   if snapcraft pack; then
     SNAPCRAFT_OK=true

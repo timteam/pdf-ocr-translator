@@ -226,6 +226,11 @@ class OCRService {
   static Future<void> initPaddleOCR() async {
     try {
       final appDir = await getApplicationSupportDirectory();
+      // Supprimer l'ancien script paddleocr.py s'il existe : un fichier portant
+      // ce nom dans le même répertoire ombre le vrai package paddleocr dans sys.path.
+      final legacy = File(p.join(appDir.path, 'paddleocr.py'));
+      if (await legacy.exists()) await legacy.delete();
+
       final scriptPath = p.join(appDir.path, 'paddle_runner.py');
       // Toujours réécrire pour refléter la version embarquée dans l'app
       final src = await rootBundle.loadString('assets/scripts/paddle_runner.py');

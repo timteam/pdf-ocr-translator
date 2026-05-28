@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Wrapper PaddleOCR pour pdf-ocr-translator.
+Wrapper PaddleOCR 3.x pour pdf-ocr-translator.
 
 Modes :
   detect <image_path>
@@ -14,13 +14,18 @@ Modes :
 import sys
 import os
 import json
+import logging
+
+# Supprimer les messages de log verbeux au démarrage
+for _n in ("paddle", "paddleocr", "paddlex", "ppdet", "root"):
+    logging.getLogger(_n).setLevel(logging.ERROR)
 
 
-# Correspondance BCP-47 → code langue PaddleOCR
+# Correspondance BCP-47 → code langue PaddleOCR 3.x
 LANG_MAP = {
     "en": "en",
     "fr": "fr",
-    "de": "german",
+    "de": "de",
     "es": "es",
     "it": "it",
     "pt": "pt",
@@ -30,7 +35,7 @@ LANG_MAP = {
     "ja": "japan",
     "zh": "ch",
     "ko": "korean",
-    "ar": "arabic",
+    "ar": "ar",       # ARABIC_LANGS en 3.x (était "arabic" en 2.x)
     "hi": "hi",
     "th": "th",
     "vi": "vi",
@@ -48,48 +53,29 @@ def import_paddleocr():
 def make_ocr(lang):
     PaddleOCR = import_paddleocr()
     return PaddleOCR(
-        use_angle_cls=True,
         lang=lang,
-        show_log=False,
-        use_gpu=False,
-        # Qualité maximale : modèles server (PP-OCRv4 large) + scoring lent
-        ocr_version="PP-OCRv4",
-        structure_version="PP-StructureV2",
-        det_db_score_mode="slow",    # Scoring polygon précis vs rapide
-        det_db_unclip_ratio=1.6,     # Boîtes légèrement plus larges → moins de coupures
-        rec_batch_num=6,             # Plus de textes en parallèle → meilleure cohérence
+        use_textline_orientation=True,   # détection de l'orientation des lignes
+        text_det_unclip_ratio=1.6,       # boîtes légèrement plus larges → moins de coupures
+        text_recognition_batch_size=6,   # reconnaissance en parallèle
     )
 
 
-def extract_items(result):
-    """Normalise le résultat PaddleOCR (compatible v2.x et v3.x)."""
-    if not result:
-        return []
-    # v2.x retourne [[items…]], v3.x peut retourner [items…] directement
-    first = result[0]
-    if first and isinstance(first[0], list) and isinstance(first[0][0], list):
-        return first  # v2.x
-    if first and isinstance(first[0], (list, tuple)) and len(first[0]) == 2:
-        return first  # v3.x déjà aplati
-    return result[0] if result else []
-
-
-def polygon_to_rect(box):
+def polygon_to_rect(poly):
     """Convertit un polygone 4-points en rectangle englobant."""
-    xs = [p[0] for p in box]
-    ys = [p[1] for p in box]
+    xs = [float(p[0]) for p in poly]
+    ys = [float(p[1]) for p in poly]
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def text_from_result(result, min_conf=0.4):
-    """Extrait le texte concaténé d'un résultat PaddleOCR."""
+def text_from_result(result_list, min_conf=0.4):
+    """Extrait le texte concaténé d'un résultat PaddleOCR 3.x."""
     parts = []
-    for item in extract_items(result):
+    for result in result_list:
         try:
-            box, (text, conf) = item
-            if conf >= min_conf and text.strip():
-                parts.append(text.strip())
-        except (TypeError, ValueError):
+            for text, conf in zip(result["rec_texts"], result["rec_scores"]):
+                if float(conf) >= min_conf and text.strip():
+                    parts.append(text.strip())
+        except (KeyError, TypeError):
             pass
     return " ".join(parts)
 
@@ -142,7 +128,7 @@ def detect_dominant_script(text):
 
 
 def is_latin_or_empty(text):
-    """Vrai si le texte ch est trop Latin/vide pour être fiable (page latine)."""
+    """Vrai si le texte est trop Latin/vide pour être fiable (page latine)."""
     non_ws = text.replace(" ", "")
     if not non_ws:
         return True
@@ -155,33 +141,22 @@ def run_detect(image_path):
     Détection de script en 3 passes au maximum.
 
     Passe 1 : modèle ch  → fiable pour CJK, coréen, arabe, cyrillique, devanagari, thaï.
-              Si le script est clairement non-latin et non-CJK → terminé.
-              Si "cjk" → ambiguïté chinois/japonais → passe 2.
-              Si latin/vide → possible page japonaise à katakana dominant → passe 2.
-
     Passe 2 : modèle japan → détecte hiragana/katakana.
-              Si "japanese" → terminé.
-              Si "cjk" ET passe 1 était déjà "cjk" → chinois → terminé.
-              Sinon → passe 3.
-
     Passe 3 : modèle en  → pages latines uniquement.
     """
     # ── Passe 1 : modèle ch ──────────────────────────────────────────────────
     ocr_ch = make_ocr("ch")
-    text_ch = text_from_result(ocr_ch(image_path))
+    text_ch = text_from_result(ocr_ch.predict(image_path))
     script_ch = detect_dominant_script(text_ch)
 
-    # Scripts sans ambiguïté → réponse immédiate
     if script_ch in ("arabic", "cyrillic", "devanagari", "thai", "korean", "japanese"):
         json.dump({"text": text_ch, "script": script_ch}, sys.stdout, ensure_ascii=False)
         return
 
     # ── Passe 2 : modèle japan ───────────────────────────────────────────────
-    # Nécessaire si ch voit "cjk" (kanji → chinois ou japonais ?) ou échoue
-    # (pages à katakana/hiragana dominants que ch ne reconnaît pas bien).
     if script_ch == "cjk" or is_latin_or_empty(text_ch):
         ocr_jp = make_ocr("japan")
-        text_jp = text_from_result(ocr_jp(image_path))
+        text_jp = text_from_result(ocr_jp.predict(image_path))
         script_jp = detect_dominant_script(text_jp)
 
         if script_jp == "japanese":
@@ -189,46 +164,48 @@ def run_detect(image_path):
             return
 
         if script_ch == "cjk":
-            # ch et japan voient du CJK sans hiragana/katakana → chinois
             json.dump({"text": text_ch, "script": "cjk"}, sys.stdout, ensure_ascii=False)
             return
 
     # ── Passe 3 : modèle en  ─────────────────────────────────────────────────
     ocr_en = make_ocr("en")
-    text_en = text_from_result(ocr_en(image_path))
+    text_en = text_from_result(ocr_en.predict(image_path))
     json.dump({"text": text_en, "script": "latin"}, sys.stdout, ensure_ascii=False)
 
 
 def run_ocr(image_path, bcp47_lang):
-    """OCR complet avec le modèle PaddleOCR adapté à la langue."""
+    """OCR complet avec le modèle PaddleOCR 3.x adapté à la langue."""
     paddle_lang = LANG_MAP.get(bcp47_lang, "en")
     ocr = make_ocr(paddle_lang)
-    result = ocr(image_path)
+    result_list = ocr.predict(image_path)
 
     blocks = []
-    for item in extract_items(result):
+    for result in result_list:
         try:
-            box, (text, conf) = item
-        except (TypeError, ValueError):
+            polys = result["rec_polys"]
+            texts = result["rec_texts"]
+            scores = result["rec_scores"]
+        except (KeyError, TypeError):
             continue
-        if conf < 0.5 or not text.strip():
-            continue
-        left, top, right, bottom = polygon_to_rect(box)
-        blocks.append({
-            "text": text.strip(),
-            "confidence": float(conf),
-            "left": float(left),
-            "top": float(top),
-            "right": float(right),
-            "bottom": float(bottom),
-        })
+        for poly, text, conf in zip(polys, texts, scores):
+            if float(conf) < 0.5 or not text.strip():
+                continue
+            left, top, right, bottom = polygon_to_rect(poly)
+            blocks.append({
+                "text": text.strip(),
+                "confidence": float(conf),
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+            })
 
     json.dump(blocks, sys.stdout, ensure_ascii=False)
 
 
 def main():
     if len(sys.argv) < 3:
-        sys.exit("Usage: paddleocr.py detect <image> | ocr <image> <bcp47_lang>")
+        sys.exit("Usage: paddle_runner.py detect <image> | ocr <image> <bcp47_lang>")
 
     mode = sys.argv[1]
     image_path = sys.argv[2]
@@ -240,7 +217,7 @@ def main():
         run_detect(image_path)
     elif mode == "ocr":
         if len(sys.argv) < 4:
-            sys.exit("Usage: paddleocr.py ocr <image> <bcp47_lang>")
+            sys.exit("Usage: paddle_runner.py ocr <image> <bcp47_lang>")
         run_ocr(image_path, sys.argv[3])
     else:
         sys.exit(f"Mode inconnu: {mode}")
