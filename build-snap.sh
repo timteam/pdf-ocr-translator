@@ -74,7 +74,7 @@ BUNDLE="build/linux/x64/release/bundle/pdf_ocr_translator"
 NEEDS_FLUTTER_BUILD=false
 if [[ ! -f "$BUNDLE" ]]; then
   NEEDS_FLUTTER_BUILD=true
-elif find lib pubspec.yaml -newer "$BUNDLE" -print -quit 2>/dev/null | grep -q .; then
+elif find lib assets pubspec.yaml -newer "$BUNDLE" -print -quit 2>/dev/null | grep -q .; then
   NEEDS_FLUTTER_BUILD=true
 fi
 
@@ -103,11 +103,6 @@ echo -e "${YELLOW}🔨 Packaging snap...${NC}"
 # --clean : nettoie tout le state snapcraft (parts/stage/prime).
 # Nécessaire après modification de stage-packages pour éviter un prime
 # incohérent. En build incrémental, snapcraft détecte les changements seul.
-if $CLEAN; then
-  echo "Nettoyage du state snapcraft..."
-  snapcraft clean
-fi
-
 # Hash de snapcraft.yaml pour détecter automatiquement un changement de
 # stage-packages et avertir l'utilisateur s'il n'a pas passé --clean.
 HASH_FILE=".snapcraft_yaml_hash"
@@ -120,7 +115,29 @@ if [[ -f "$HASH_FILE" ]]; then
   fi
 fi
 
-if snapcraft pack; then
+SNAPCRAFT_OK=false
+
+if $CLEAN; then
+  echo -e "${YELLOW}🧹 Nettoyage du state snapcraft...${NC}"
+  snapcraft clean
+  echo -e "${YELLOW}🔨 Build complet...${NC}"
+  # Après un clean total, snapcraft (sans sous-commande) reconstruit toutes les parts.
+  if snapcraft; then
+    SNAPCRAFT_OK=true
+  fi
+else
+  # Build incrémental : snapcraft pack ne rebuild pas les parts.
+  # On re-prime explicitement flutter-app pour que le bundle Flutter frais
+  # (issu du flutter build précédent) soit copié dans prime/ avant le packaging.
+  echo -e "${YELLOW}🔄 Synchronisation bundle Flutter → prime/...${NC}"
+  snapcraft prime flutter-app
+  echo -e "${YELLOW}🔨 Packaging snap...${NC}"
+  if snapcraft pack; then
+    SNAPCRAFT_OK=true
+  fi
+fi
+
+if $SNAPCRAFT_OK; then
     echo "$CURRENT_HASH" > "$HASH_FILE"
     echo -e "${GREEN}✅ Snap build completed successfully!${NC}"
 
