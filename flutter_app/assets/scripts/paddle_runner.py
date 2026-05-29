@@ -8,16 +8,31 @@ Modes :
 
   ocr <image_path> <bcp47_lang>
       stdout → JSON  [{"text":"…", "confidence":0.95, "left":10, "top":5, "right":200, "bottom":30}, …]
+
+Préprocessing :
+  - CLAHE (Contrast Limited Adaptive Histogram Equalization) pour améliorer le contraste local
+  - Adaptive Thresholding (Otsu) pour binarisation intelligente
+  - Deskew via OpenCV pour correction d'inclinaison rapide
 """
 import sys
 import os
 import json
 import traceback
 import io
+import numpy as np
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True, write_through=True)
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True, write_through=True)
+
+# ── Import conditionnel de OpenCV ───────────────────────────────────────────
+# OpenCV est bundlé dans le snap via opencv-python
+try:
+    import cv2
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
+    dbg("OpenCV non disponible — préprocessing limité")
 
 
 def dbg(msg):
@@ -25,6 +40,124 @@ def dbg(msg):
 
 
 dbg("démarrage")
+
+
+# =============================================================================
+# PRÉPROCESSING AVEC OPENCV (Option B+C)
+# =============================================================================
+
+
+def preprocess_image_cv2(image_path):
+    """
+    Applique un pipeline de préprocessing optimisé pour PP-OCRv4.
+    
+    Pipeline :
+    1. Lecture en niveaux de gris
+    2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    3. Binarisation adaptative (Otsu)
+    4. Deskew (correction d'inclinaison)
+    
+    Retourne : image préprocessée (numpy array)
+    """
+    if not OPENCV_AVAILABLE:
+        dbg("OpenCV non disponible — retour image originale")
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        return img
+    
+    try:
+        # 1. Lecture en niveaux de gris
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            dbg(f"Échec lecture image: {image_path}")
+            return None
+        
+        dbg(f"Image originale: {img.shape[1]}x{img.shape[0]} px")
+        
+        # 2. CLAHE - Amélioration du contraste local
+        # clipLimit=2.0, tileGridSize=(8,8) sont les valeurs standard pour OCR
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img = clahe.apply(img)
+        dbg("CLAHE appliqué")
+        
+        # 3. Binarisation adaptative avec Otsu
+        # THRESH_BINARY_INV car le texte est sombre sur fond clair
+        _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        dbg("Thresholding Otsu appliqué")
+        
+        # 4. Deskew via analyse des lignes de texte
+        img = deskew_cv2(img)
+        dbg("Deskew appliqué")
+        
+        dbg(f"Image préprocessée: {img.shape[1]}x{img.shape[0]} px")
+        return img
+        
+    except Exception as e:
+        dbg(f"Erreur préprocessing: {e}")
+        # Retourne l'image originale en grayscale
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        return img if img is not None else None
+
+
+def deskew_cv2(img):
+    """
+    Corrige l'inclinaison de l'image via OpenCV (beaucoup plus rapide que Dart).
+    
+    Méthode :
+    - Détecte les contours du texte
+    - Calcule l'angle moyen via minAreaRect
+    - Applique la rotation inverse
+    """
+    if not OPENCV_AVAILABLE:
+        return img
+    
+    try:
+        # Trouver les pixels noirs (texte)
+        coords = np.column_stack(np.where(img < 200))
+        
+        if len(coords) < 100:  # Pas assez de texte détecté
+            dbg("Pas assez de texte pour deskew")
+            return img
+        
+        # Calculer l'angle via minAreaRect
+        rect = cv2.minAreaRect(coords)
+        angle = rect[2]
+        
+        # Corriger l'angle (OpenCV retourne l'angle de la largeur, pas de la hauteur)
+        if angle < -45:
+            angle = -(90 + angle)
+        else:
+            angle = -angle
+        
+        dbg(f"Angle détecté: {angle:.2f}°")
+        
+        # Ne pas corriger si angle négligeable
+        if abs(angle) < 0.5:
+            dbg("Inclinaison négligeable (< 0.5°)")
+            return img
+        
+        # Rotation
+        (h, w) = img.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        img = cv2.warpAffine(
+            img, 
+            M, 
+            (w, h), 
+            flags=cv2.INTER_CUBIC, 
+            borderMode=cv2.BORDER_REPLICATE
+        )
+        dbg(f"Image tournée de {angle:.2f}°")
+        return img
+        
+    except Exception as e:
+        dbg(f"Erreur deskew: {e}")
+        return img
+
+
+# =============================================================================
+# FIN PRÉPROCESSING
+# =============================================================================
+
 
 # ── Localisation des modèles ONNX ─────────────────────────────────────────────
 # En contexte snap : $SNAP/data/flutter_assets/assets/models/onnx/
@@ -240,6 +373,33 @@ def run_detect(image_path):
 def run_ocr(image_path, bcp47_lang):
     model_key = LANG_TO_MODEL.get(bcp47_lang, "ch")
     dbg(f"run_ocr : lang={bcp47_lang} → model={model_key}")
+    
+    # Appliquer le préprocessing avec OpenCV si disponible
+    if OPENCV_AVAILABLE:
+        dbg("Préprocessing OpenCV activé…")
+        try:
+            # Sauvegarder l'image préprocessée dans un fichier temporaire
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                tmp_path = tmp.name
+            
+            processed_img = preprocess_image_cv2(image_path)
+            if processed_img is not None:
+                cv2.imwrite(tmp_path, processed_img)
+                dbg(f"Image préprocessée sauvegardée: {tmp_path}")
+                image_path = tmp_path
+                
+                # Nettoyer après OCR
+                import atexit
+                def cleanup():
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+                atexit.register(cleanup)
+        except Exception as e:
+            dbg(f"Préprocessing échoué, utilisation image originale: {e}")
+    
     ocr = make_ocr(model_key)
     dbg("run_ocr : predict…")
     result, _ = ocr(image_path)

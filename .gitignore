@@ -103,6 +103,7 @@ models/
 # Modèles de traduction (taille importante - ne pas commiter)
 translation_models/
 flutter_app/assets/translation_models/
+snap/translation_models/
 *.onnx
 *.bin
 *.pt

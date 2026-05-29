@@ -42,6 +42,38 @@ echo -e "${YELLOW}🔍 Vérification du modèle FastText LID...${NC}"
 echo -e "${YELLOW}🔍 Vérification des wheels Python...${NC}"
 ./scripts/download_pip_wheels.sh
 
+# ── Modèles de traduction OPUS-MT ────────────────────────────────────────────
+echo -e "${YELLOW}🔍 Vérification des modèles de traduction...${NC}"
+SNAP_MODELS_DIR="snap/translation_models"
+FLUTTER_MODELS_DIR="flutter_app/assets/translation_models"
+mkdir -p "$SNAP_MODELS_DIR"
+mkdir -p "$FLUTTER_MODELS_DIR"
+
+# Vérifier si au moins un modèle existe (dans snap/ ou flutter_app/)
+MODELS_COUNT=$(find "$SNAP_MODELS_DIR" "$FLUTTER_MODELS_DIR" -mindepth 1 -maxdepth 2 -type f \( -name "*.onnx" -o -name "*.bin" -o -name "*.spm" \) 2>/dev/null | wc -l)
+
+if [[ $MODELS_COUNT -eq 0 ]]; then
+  echo -e "${YELLOW}📥 Génération des modèles de traduction dans snap/translation_models/...${NC}"
+  echo -e "${YELLOW}   Cela peut prendre 20-30 min et nécessite ~1.1GB d'espace disque.${NC}"
+  echo -e "   Nécessite : curl, python3, pip, ctranslate2"
+  echo -e "   (Tape Ctrl+C pour annuler et utiliser uniquement la détection de langue)"
+  sleep 3
+  
+  if ./scripts/prepare_translation_models.sh "$SNAP_MODELS_DIR"; then
+    echo -e "${GREEN}✅ Modèles de traduction générés dans snap/translation_models/${NC}"
+    # Copier aussi dans flutter_app/ pour le mode dev
+    mkdir -p "$FLUTTER_MODELS_DIR"
+    cp -r "$SNAP_MODELS_DIR"/* "$FLUTTER_MODELS_DIR/" 2>/dev/null || true
+  else
+    echo -e "${RED}⚠️  Génération des modèles échouée ou annulée${NC}"
+    echo -e "   La traduction sera désactivée, mais l'OCR et la détection de langue fonctionneront."
+    echo -e "   Pour activer la traduction, exécute : ./scripts/prepare_translation_models.sh snap/translation_models/"
+    exit 1
+  fi
+else
+  echo -e "${GREEN}✅ $MODELS_COUNT fichiers de modèles trouvés${NC}"
+fi
+
 # ── Flutter build (conditionnel) ─────────────────────────────────────────────
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo -e "${RED}❌ Snap build requires a Linux host.${NC}"

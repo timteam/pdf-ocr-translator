@@ -126,8 +126,7 @@ display_model_list() {
 check_dependencies() {
   local missing=()
 
-  command -v git >/dev/null 2>&1 || missing+=("git")
-  command -v git-lfs >/dev/null 2>&1 || missing+=("git-lfs")
+  command -v curl >/dev/null 2>&1 || missing+=("curl")
   command -v python3 >/dev/null 2>&1 || missing+=("python3")
   command -v pip >/dev/null 2>&1 || missing+=("pip")
 
@@ -135,9 +134,8 @@ check_dependencies() {
     echo "ERREUR: Dépendances manquantes: ${missing[*]}"
     echo ""
     echo "Installez-les avec :"
-    echo "  Ubuntu/Debian: sudo apt-get install git git-lfs python3 python3-pip"
-    echo "  macOS: brew install git git-lfs python"
-    echo "  git-lfs: git lfs install"
+    echo "  Ubuntu/Debian: sudo apt-get install curl python3 python3-pip"
+    echo "  macOS: brew install curl python"
     exit 1
   fi
 
@@ -151,21 +149,73 @@ check_dependencies() {
 }
 
 # Convertit un modèle HuggingFace en format CTranslate2
+# Utilise curl pour télécharger directement depuis HuggingFace (sans git-lfs)
 convert_model() {
-  local model_dir="$1"
+  local hf_repo="$1"
   local output_dir="$2"
   local model_name="$3"
 
-  echo "  Conversion de $model_name..."
+  echo "  Conversion de $model_name depuis $hf_repo..."
 
   # Crée un répertoire temporaire pour la conversion
   local tmp_dir=$(mktemp -d)
   trap "rm -rf $tmp_dir" EXIT
 
-  # Télécharge le modèle avec git-lfs
-  if [ ! -d "$tmp_dir/model" ]; then
-    git lfs install --skip-smudge 2>/dev/null || true
-    git clone --depth 1 --filter=blob:none "https://huggingface.co/${MODEL_MAP[$model_name]}" "$tmp_dir/model" 2>&1 | grep -E "(Cloning|Receiving|Resolving)" || true
+  # Extrait le nom du modèle depuis la configuration
+  local hf_model="${MODEL_MAP[$model_name]}"
+  # Si le format est REPO:MODEL, extraire le modèle
+  if [[ "$hf_model" == *":"* ]]; then
+    hf_model=$(echo "$hf_model" | cut -d':' -f2)
+  else
+    hf_model="$hf_model"
+  fi
+
+  # Télécharge le répertoire du modèle via curl + HF API
+  # HuggingFace : https://huggingface.co/{repo}/resolve/main/{file}
+  local model_url="https://huggingface.co/${hf_repo}"
+  local model_path="$tmp_dir/model"
+  mkdir -p "$model_path"
+
+  # Télécharge tous les fichiers nécessaires depuis HuggingFace
+  # Pour les modèles Transformers, on a besoin de :
+  # - config.json
+  # - pytorch_model.bin (ou tf_model.h5)
+  # - tokenizer.json / tokenizer_config.json
+  # - special_tokens_map.json
+  # - vocab.txt (ou sentencepiece.bpe.model, etc.)
+  
+  echo "  Téléchargement des fichiers depuis HuggingFace..."
+  
+  # Liste des fichiers à télécharger pour un modèle OPUS-MT
+  local files_to_download=(
+    "config.json"
+    "pytorch_model.bin"
+    "tokenizer.json"
+    "tokenizer_config.json"
+    "special_tokens_map.json"
+    "source.spm"
+    "target.spm"
+    "sentencepiece.bpe.model"
+    "vocab.json"
+  )
+
+  for file in "${files_to_download[@]}"; do
+    if curl -s -f -L "${model_url}/resolve/main/${file}" -o "${model_path}/${file}" 2>/dev/null; then
+      echo "    ✓ Téléchargé: $file"
+    else
+      # Essayer sans resolve/main
+      if curl -s -f -L "${model_url}/${file}" -o "${model_path}/${file}" 2>/dev/null; then
+        echo "    ✓ Téléchargé: $file (chemin direct)"
+      else
+        echo "    ⚠ Non trouvé: $file"
+      fi
+    fi
+  done
+
+  # Vérifier qu'on a au moins pytorch_model.bin ou un fichier de poids
+  if [ ! -f "${model_path}/pytorch_model.bin" ] && [ ! -f "${model_path}/model.safetensors" ] && [ ! -f "${model_path}/model.bin" ]; then
+    echo "  ❌ Aucun fichier de poids trouvé pour ${model_name}"
+    return 1
   fi
 
   # Convertit en CTranslate2

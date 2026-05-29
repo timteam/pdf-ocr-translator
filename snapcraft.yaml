@@ -83,6 +83,18 @@ parts:
     override-prime: |
       mkdir -p "$SNAPCRAFT_PRIME/gnome-platform"
 
+  # Modèles de traduction OPUS-MT (prégénérés, ~1.1GB total)
+  # Ces modèles sont générés par scripts/prepare_translation_models.sh
+  # et doivent être présents dans snap/translation_models/ avant le build.
+  translation-models:
+    plugin: dump
+    source: ./snap/translation_models
+    source-type: local
+    organize:
+      '*': data/flutter_assets/assets/translation_models
+    stage:
+      - '*'
+
   # EGL : libepoxy (fourni par le content snap) dlopen-charge libEGL.so.1 au
   # runtime. libEGL.so.1 (GLVND) doit trouver un provider via les ICD dans
   # __EGL_VENDOR_LIBRARY_DIRS. libegl-mesa0 fournit libEGL_mesa.so.0 et le

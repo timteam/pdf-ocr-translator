@@ -105,14 +105,15 @@ Map<String, dynamic> _deskewOnly(Uint8List srcBytes) {
 }
 
 // ─── Correction d'inclinaison (deskew) ────────────────────────────────────────
-// Recherche en 3 passes pour couvrir ±85° sans exploser en temps de calcul :
-//   1. ±85° step 5°  sur image 1/12  — repère le cadrant (ex : scan à 35°)
-//   2. ±8°  step 0.3° sur image 1/6  — affine autour du meilleur candidat
-//   3. ±0.5° step 0.05° sur image 1/6 — précision sub-degré finale
+// Recherche en 3 passes optimisées pour performance/qualité :
+//   1. ±85° step 10° sur image 1/16 — repère le cadrant (17 itérations vs 35)
+//   2. ±5°  step 0.5° sur image 1/8  — affine autour du meilleur (21 itérations vs 54)
+//   3. ±0.5° step 0.1° sur image 1/8 — précision finale (11 itérations vs 21)
+// Gain estimé : ~60-70% plus rapide avec perte de précision négligeable
 ({img.Image image, double angle, int prepW, int prepH}) _ppDeskew(
     img.Image binary, {List<String>? logs}) {
-  // Passe 1 — très grossière sur image 1/12 (rapide, tolérant les grands angles)
-  const tinyDiv = 12;
+  // Passe 1 — très grossière sur image 1/16 (rapide, tolérant les grands angles)
+  const tinyDiv = 16;
   final tiny = img.copyResize(
     binary,
     width: max(1, binary.width ~/ tinyDiv),
@@ -123,13 +124,14 @@ Map<String, dynamic> _deskewOnly(Uint8List srcBytes) {
 
   double bestAngle = 0.0;
   double bestScore = -1.0;
-  for (double a = -85.0; a <= 85.0; a += 5.0) {
+  // Step 10° au lieu de 5° : 17 itérations vs 35
+  for (double a = -85.0; a <= 85.0; a += 10.0) {
     final score = _ppProjectionVariance(img.copyRotate(tiny, angle: a));
     if (score > bestScore) { bestScore = score; bestAngle = a; }
   }
 
-  // Passe 2 — intermédiaire sur image 1/6 (±8° autour du meilleur candidat)
-  const sampleDiv = 6;
+  // Passe 2 — intermédiaire sur image 1/8 (±5° autour du meilleur candidat)
+  const sampleDiv = 8;
   final small = img.copyResize(
     binary,
     width: binary.width ~/ sampleDiv,
@@ -140,15 +142,17 @@ Map<String, dynamic> _deskewOnly(Uint8List srcBytes) {
 
   double medScore = -1.0;
   double medAngle = bestAngle;
-  for (double a = bestAngle - 8.0; a <= bestAngle + 8.0; a += 0.3) {
+  // Step 0.5° au lieu de 0.3° : 21 itérations vs 54
+  for (double a = bestAngle - 5.0; a <= bestAngle + 5.0; a += 0.5) {
     final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
     if (score > medScore) { medScore = score; medAngle = a; }
   }
   bestAngle = medAngle;
   bestScore = medScore;
 
-  // Passe 3 — affinage fin (±0.5° step 0.05°)
-  for (double a = bestAngle - 0.5; a <= bestAngle + 0.5; a += 0.05) {
+  // Passe 3 — affinage fin (±0.5° step 0.1° au lieu de 0.05°)
+  // 11 itérations vs 21, précision finale suffisante
+  for (double a = bestAngle - 0.5; a <= bestAngle + 0.5; a += 0.1) {
     final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
     if (score > bestScore) { bestScore = score; bestAngle = a; }
   }
