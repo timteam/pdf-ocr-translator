@@ -5,24 +5,68 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'app_logger.dart';
 
+/// Graphe de pivots : pour chaque paire 'src-tgt' (BCP-47), le nom du répertoire
+/// du modèle bundlé et le token de langue optionnel à préfixer aux tokens source.
+///
+/// Architecture : étoile centrée sur l'anglais.
+///   - Toute langue source → EN  (modèles pivot)
+///   - EN → toute langue cible   (modèles de sortie)
+///
+/// Modèles stockés dans :
+///   snap  : $SNAP/data/flutter_assets/assets/translation_models/{name}/
+///   debug : <exe_dir>/data/flutter_assets/assets/translation_models/{name}/
+///
+/// Générer les modèles avec scripts/prepare_translation_models.sh avant le build.
 class TranslationService {
   final logger = AppLogger.build();
 
-  late String _modelsDir;
   late String _scriptPath;
   Map<String, String> _cache = {};
 
-  // Paires sans modèle direct sur HuggingFace → pivot via EN
-  final Set<String> _noPairModel = {};
+  // ─── Graphe des modèles ───────────────────────────────────────────────────────
+  // Clé   : 'src-tgt'   (codes BCP-47)
+  // Valeur : (répertoire du modèle, token de langue ou null)
+  static const Map<String, (String, String?)> _modelSpec = {
+    // ── Source → Anglais (pivot) ──────────────────────────────────────────────
+    'ja-en': ('ja-en',      null),        // opus-mt-ja-en
+    'zh-en': ('zh-en',      null),        // opus-mt-zh-en
+    'ko-en': ('ko-en',      null),        // opus-mt-ko-en
+    'ru-en': ('ru-en',      null),        // opus-mt-ru-en
+    'ar-en': ('ar-en',      null),        // opus-mt-ar-en
+    'hi-en': ('hi-en',      null),        // opus-mt-hi-en
+    'th-en': ('th-en',      null),        // opus-mt-th-en
+    'vi-en': ('vi-en',      null),        // opus-mt-vi-en
+    'fr-en': ('ROMANCE-en', null),        // opus-mt-ROMANCE-en (fr,es,it,pt→en)
+    'es-en': ('ROMANCE-en', null),
+    'pt-en': ('ROMANCE-en', null),
+    'it-en': ('ROMANCE-en', null),
+    'de-en': ('de-en',      null),        // opus-mt-de-en
+    'nl-en': ('nl-en',      null),        // opus-mt-nl-en
+    'pl-en': ('pl-en',      null),        // opus-mt-pl-en
+
+    // ── Anglais → Cible ───────────────────────────────────────────────────────
+    'en-fr': ('en-ROMANCE', '>>fr<<'),    // opus-mt-en-ROMANCE (fr,es,it,pt)
+    'en-es': ('en-ROMANCE', '>>es<<'),
+    'en-pt': ('en-ROMANCE', '>>pt<<'),
+    'en-it': ('en-ROMANCE', '>>it<<'),
+    'en-de': ('en-de',      null),        // opus-mt-en-de
+    'en-nl': ('en-nl',      null),        // opus-mt-en-nl
+    'en-ru': ('en-ru',      null),        // opus-mt-en-ru
+    'en-hi': ('en-hi',      null),        // opus-mt-en-hi
+    'en-zh': ('en-zh',      '>>cmn<<'),   // opus-mt-en-zh (Mandarin)
+    'en-ar': ('tc-big-en-ar','>>ara<<'),  // opus-mt-tc-big-en-ar
+    'en-vi': ('en-vi',      '>>vie<<'),   // opus-mt-en-vi
+    'en-ja': ('en-mul',     '>>jpn<<'),   // opus-mt-en-mul (ISO 639-3)
+    'en-th': ('en-mul',     '>>tha<<'),   // opus-mt-en-mul
+    'en-pl': ('en-sla',     '>>pol<<'),   // opus-mt-en-sla (langues slaves)
+    'en-ko': ('tc-big-en-ko', null),      // opus-mt-tc-big-en-ko (dédié en→ko)
+  };
 
   // ─── Initialisation ──────────────────────────────────────────────────────────
 
   Future<void> initialize() async {
     final appDir = await getApplicationSupportDirectory();
-    _modelsDir = p.join(appDir.path, 'opus_models');
-    await Directory(_modelsDir).create(recursive: true);
 
-    // Extraire le script Python depuis les assets (mis à jour à chaque lancement)
     _scriptPath = p.join(appDir.path, 'opusmt_translate.py');
     final src = await rootBundle.loadString('assets/scripts/opusmt_translate.py');
     await File(_scriptPath).writeAsString(src);
@@ -33,7 +77,6 @@ class TranslationService {
 
   // ─── API publique ─────────────────────────────────────────────────────────────
 
-  /// Traduit un texte unique. Utilise [translateBatch] en interne.
   Future<String> translateText(
     String text,
     String fromLanguage,
@@ -52,7 +95,6 @@ class TranslationService {
     return translated;
   }
 
-  /// Traduit une liste de textes en un seul appel Python (un subprocess par paire).
   Future<List<String>> translateBatch(
     List<String> texts,
     String fromLanguage,
@@ -60,7 +102,6 @@ class TranslationService {
   ) async {
     if (fromLanguage == toLanguage) return texts;
 
-    // Résoudre le cache : ne soumettre que les textes non encore traduits
     final results = List<String?>.filled(texts.length, null);
     final uncachedIdx = <int>[];
     for (var i = 0; i < texts.length; i++) {
@@ -95,102 +136,80 @@ class TranslationService {
 
   int getCacheSize() => _cache.length;
 
-  // ─── Logique de traduction ────────────────────────────────────────────────────
+  // ─── Chemin des modèles bundlés ───────────────────────────────────────────────
+
+  /// Chemin vers le répertoire d'un modèle bundlé dans le snap/build Flutter.
+  /// En mode snap  : $SNAP/data/flutter_assets/assets/translation_models/{name}
+  /// En mode debug : <exe>/data/flutter_assets/assets/translation_models/{name}
+  String _getModelDir(String modelName) {
+    final exeDir = p.dirname(Platform.resolvedExecutable);
+    return p.join(
+      exeDir, 'data', 'flutter_assets', 'assets', 'translation_models', modelName,
+    );
+  }
+
+  bool _modelAvailable(String pair) {
+    final spec = _modelSpec[pair];
+    if (spec == null) return false;
+    final (modelName, _) = spec;
+    return File(p.join(_getModelDir(modelName), 'model.bin')).existsSync();
+  }
+
+  // ─── Logique de traduction avec pivot EN ──────────────────────────────────────
 
   Future<List<String>> _translateUncached(
     List<String> texts,
     String src,
     String tgt,
   ) async {
-    // Essai paire directe
-    if (await _ensureModel(src, tgt)) {
-      return _callPython(texts, src, tgt);
+    if (src == tgt) return texts;
+
+    // Tentative directe
+    final directPair = '$src-$tgt';
+    if (_modelAvailable(directPair)) {
+      try {
+        return await _callPython(texts, directPair);
+      } catch (e) {
+        logger.w('Traduction directe $src→$tgt échouée ($e). Tentative pivot.');
+      }
     }
 
     // Pivot via l'anglais
     if (src == 'en' || tgt == 'en') {
-      throw Exception(
-        'Modèle opus-mt-tc-tiny-$src-$tgt introuvable sur HuggingFace '
-        '(aucun pivot possible sans anglais).',
-      );
+      logger.w('Modèle $src→$tgt non disponible — textes conservés en $src.');
+      return texts;
     }
-    logger.i('Pivot EN: $src→en→$tgt (${texts.length} texte(s))');
-    final inEnglish = await _translateUncached(texts, src, 'en');
-    return _translateUncached(inEnglish, 'en', tgt);
-  }
 
-  // ─── Gestion des modèles ──────────────────────────────────────────────────────
-
-  String _modelDir(String src, String tgt) =>
-      p.join(_modelsDir, 'opus-mt-tc-tiny-$src-$tgt');
-
-  Future<bool> _ensureModel(String src, String tgt) async {
-    if (_noPairModel.contains('$src-$tgt')) return false;
-    if (await File(p.join(_modelDir(src, tgt), 'model.bin')).exists()) return true;
-    return _downloadModel(src, tgt);
-  }
-
-  Future<bool> _downloadModel(String src, String tgt) async {
-    final dir = _modelDir(src, tgt);
-    final base = 'https://huggingface.co/Helsinki-NLP/opus-mt-tc-tiny-$src-$tgt/resolve/main';
-
-    await Directory(dir).create(recursive: true);
-    logger.i('Téléchargement opus-mt-tc-tiny-$src-$tgt…');
-
+    logger.i('Pivot EN : $src→en→$tgt (${texts.length} segment(s))');
     try {
-      // Fichiers obligatoires
-      for (final file in ['model.bin', 'shared_vocabulary.json']) {
-        if (!await _curl('$base/$file', p.join(dir, file))) {
-          throw Exception('Fichier requis absent: $file');
-        }
-      }
-      // Modèles SentencePiece (au moins un requis)
-      var gotSpm = false;
-      for (final file in ['source.spm', 'target.spm', 'sentencepiece.bpe.model']) {
-        if (await _curl('$base/$file', p.join(dir, file))) gotSpm = true;
-      }
-      if (!gotSpm) throw Exception('Aucun modèle SentencePiece disponible');
-
-      logger.i('Modèle opus-mt-tc-tiny-$src-$tgt prêt (${await _dirSizeMb(dir)} MB).');
-      return true;
+      final inEnglish = await _translateUncached(texts, src, 'en');
+      return await _translateUncached(inEnglish, 'en', tgt);
     } catch (e) {
-      logger.w('Pas de modèle direct $src→$tgt: $e');
-      await Directory(dir).delete(recursive: true).catchError((_) => Directory(dir));
-      _noPairModel.add('$src-$tgt');
-      return false;
+      logger.w('Pivot $src→en→$tgt échoué ($e) — textes conservés en $src.');
+      return texts;
     }
-  }
-
-  Future<bool> _curl(String url, String dest) async {
-    final r = await Process.run('curl', ['-L', '--fail', '-s', '-o', dest, url]);
-    if (r.exitCode != 0) return false;
-    final size = await File(dest).length().catchError((_) => 0);
-    return size > 100; // sanity check : un fichier vide n'est pas un modèle valide
-  }
-
-  Future<String> _dirSizeMb(String dir) async {
-    final r = await Process.run('du', ['-sh', dir]);
-    return (r.stdout as String).split('\t').first.trim();
   }
 
   // ─── Subprocess Python ────────────────────────────────────────────────────────
 
-  Future<List<String>> _callPython(
-    List<String> texts,
-    String src,
-    String tgt,
-  ) async {
-    final modelDir = _modelDir(src, tgt);
-    final logPrefix = '[$src→$tgt]';
-    logger.d('$logPrefix appel opusmt_translate.py (${texts.length} texte(s))');
+  Future<List<String>> _callPython(List<String> texts, String pair) async {
+    final (modelName, langToken) = _modelSpec[pair]!;
+    final modelDir = _getModelDir(modelName);
+    final logPrefix = '[$pair]';
+    logger.d('$logPrefix opusmt_translate.py (${texts.length} segment(s))');
 
-    final process = await Process.start('python3', [_scriptPath, modelDir]);
+    final args = [_scriptPath, modelDir];
+    if (langToken != null) args.addAll(['--token', langToken]);
+
+    final process = await Process.start(
+      'python3.12', args,
+      environment: _buildPythonEnv(),
+    );
 
     process.stdin.write(json.encode(texts));
     await process.stdin.close();
 
     final stdoutFuture = process.stdout.transform(utf8.decoder).join();
-    // Drain stderr et loguer
     process.stderr.transform(utf8.decoder).forEach((chunk) {
       for (final line in chunk.split('\n')) {
         if (line.trim().isNotEmpty) logger.w('$logPrefix stderr: $line');
@@ -201,16 +220,43 @@ class TranslationService {
     final exitCode = await process.exitCode;
 
     if (exitCode != 0) {
-      throw Exception('opusmt_translate.py $src→$tgt: exit code $exitCode');
+      throw Exception('opusmt_translate.py $pair: exit $exitCode');
     }
 
     final decoded = json.decode(output);
     if (decoded is! List || decoded.length != texts.length) {
       throw Exception(
-        '$logPrefix réponse inattendue (longueur ${decoded.length} ≠ ${texts.length})',
+        '$logPrefix réponse inattendue '
+        '(longueur ${decoded is List ? decoded.length : "?"} ≠ ${texts.length})',
       );
     }
     return List<String>.from(decoded);
+  }
+
+  // ─── Environnement Python (pyenv snap ou venv local) ─────────────────────────
+
+  Map<String, String> _buildPythonEnv() {
+    final env = Map<String, String>.from(Platform.environment);
+    if (env.containsKey('PYTHONPATH')) return env;
+
+    final exeDir = p.dirname(Platform.resolvedExecutable);
+    final localPyenv = p.join(exeDir, 'pyenv');
+    if (!Directory(localPyenv).existsSync()) return env;
+
+    env['PYTHONPATH'] = localPyenv;
+
+    final wheelLibDirs = [
+      p.join(localPyenv, 'ctranslate2.libs'),
+      p.join(localPyenv, 'numpy.libs'),
+    ].where((d) => Directory(d).existsSync()).join(':');
+
+    if (wheelLibDirs.isNotEmpty) {
+      final existing = env['LD_LIBRARY_PATH'] ?? '';
+      env['LD_LIBRARY_PATH'] =
+          existing.isEmpty ? wheelLibDirs : '$wheelLibDirs:$existing';
+    }
+
+    return env;
   }
 
   // ─── Cache persistant ─────────────────────────────────────────────────────────

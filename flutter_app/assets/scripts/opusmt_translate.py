@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Traduit un tableau JSON de textes avec un modèle CTranslate2 opus-mt-tc-tiny.
+Traduit un tableau JSON de textes avec un modèle CTranslate2 opus-mt.
 
-Usage : python3 opusmt_translate.py <model_dir>
+Usage : python3 opusmt_translate.py <model_dir> [--token >>fr<<]
+  --token TOKEN   Token de langue initial à préfixer aux tokens source
+                  (requis par les modèles multilingues : >>fr<<, >>jpn<<, etc.)
   stdin  : tableau JSON de chaînes  →  ["texte1", "texte2", …]
   stdout : tableau JSON des traductions (même longueur et ordre)
   stderr : messages de diagnostic
@@ -26,12 +28,15 @@ def load_sp(model_dir, *names):
     return None
 
 
-def translate_line(line, translator, src_sp, tgt_sp):
+def translate_line(line, translator, src_sp, tgt_sp, lang_token=None):
     if not line.strip():
         return line
     tokens = src_sp.encode(line, out_type=str)
     if not tokens:
         return line
+    # Préfixe le token de langue pour les modèles multilingues (ex: >>fra<<, >>jpn<<)
+    if lang_token:
+        tokens = [lang_token] + tokens
     result = translator.translate_batch(
         [tokens],
         beam_size=2,
@@ -43,11 +48,18 @@ def translate_line(line, translator, src_sp, tgt_sp):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit("Usage: opusmt_translate.py <model_dir>")
+        sys.exit("Usage: opusmt_translate.py <model_dir> [--token TOKEN]")
 
     model_dir = sys.argv[1]
     if not os.path.isdir(model_dir):
         sys.exit(f"Répertoire modèle introuvable : {model_dir}")
+
+    # Lecture du token de langue optionnel
+    lang_token = None
+    if '--token' in sys.argv:
+        idx = sys.argv.index('--token')
+        if idx + 1 < len(sys.argv):
+            lang_token = sys.argv[idx + 1]
 
     try:
         import ctranslate2
@@ -59,6 +71,8 @@ def main():
 
     if src_sp is None:
         sys.exit(f"Aucun modèle SentencePiece trouvé dans {model_dir}")
+    if tgt_sp is None:
+        tgt_sp = src_sp  # Certains modèles partagent le même SPM
 
     translator = ctranslate2.Translator(
         model_dir,
@@ -77,10 +91,9 @@ def main():
         if not text or not text.strip():
             results.append(text or "")
             continue
-        # Traduire ligne par ligne pour préserver les sauts de ligne internes
         lines = text.split("\n")
         translated_lines = [
-            translate_line(line, translator, src_sp, tgt_sp)
+            translate_line(line, translator, src_sp, tgt_sp, lang_token)
             for line in lines
         ]
         results.append("\n".join(translated_lines))
