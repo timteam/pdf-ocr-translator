@@ -99,6 +99,17 @@ npm-debug.log*
 output/
 translations_cache/
 models/
+
+# Modèles de traduction (taille importante - ne pas commiter)
+translation_models/
+flutter_app/assets/translation_models/
+*.onnx
+*.bin
+*.pt
+*.safetensors
+*.vocab
+*.json
+
 # Exception : modèles ONNX statiques bundlés dans le snap
 !flutter_app/assets/models/
 !flutter_app/assets/models/onnx/
