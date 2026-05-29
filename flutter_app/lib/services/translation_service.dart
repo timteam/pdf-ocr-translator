@@ -262,7 +262,12 @@ class TranslationService {
 
     for (final step in path) {
       logger.i('Étape de traduction: $step (${currentTexts.length} segments)');
-      currentTexts = await _translateStep(currentTexts, step);
+      try {
+        currentTexts = await _translateStep(currentTexts, step);
+      } catch (e) {
+        logger.w('Étape $step échouée ($e) — textes conservés sans traduction.');
+        return List.from(texts); // retour aux textes originaux
+      }
     }
 
     return currentTexts;
@@ -316,37 +321,12 @@ class TranslationService {
     );
   }
 
-  /// Vérifie si un modèle est disponible sur le système de fichiers.
+  /// Vérifie si un modèle CTranslate2 est disponible sur le système de fichiers.
   ///
-  /// Les modèles peuvent être :
-  /// 1. Dans le répertoire de données de l'application (bundlés avec le snap)
-  /// 2. Dans les assets Flutter (pour le mode dev)
-  /// 3. Téléchargés manuellement via scripts/prepare_translation_models.sh
+  /// Seul `model.bin` (format CTranslate2) est accepté par opusmt_translate.py.
+  /// Les autres formats (onnx, pt, safetensors) ne sont pas supportés.
   bool _isModelAvailable(String modelName) {
-    final modelDir = _getModelDir(modelName);
-    
-    // Vérification par extensions de fichiers modèles courantes
-    final possibleFiles = [
-      'model.bin',
-      'model.onnx',
-      'model.pt',
-      'model.safetensors',
-    ];
-
-    for (final file in possibleFiles) {
-      if (File(p.join(modelDir, file)).existsSync()) {
-        return true;
-      }
-    }
-
-    // Vérification de l'existence du répertoire avec des fichiers
-    final dir = Directory(modelDir);
-    if (dir.existsSync()) {
-      final files = dir.listSync();
-      if (files.isNotEmpty) return true;
-    }
-
-    return false;
+    return File(p.join(_getModelDir(modelName), 'model.bin')).existsSync();
   }
 
   // ============================================================================

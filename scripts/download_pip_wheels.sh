@@ -14,18 +14,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WHEELS_DIR="$SCRIPT_DIR/../wheels"
 mkdir -p "$WHEELS_DIR"
 
-PIP="python3 -m pip"
+# Le pip système de Python 3.14 (≤ 25.1.1) a un bug de parsing JSON avec l'index
+# PyPI (PEP 691) : JSONDecodeError sur les réponses de l'index simple.
+# Correction : utiliser pip.pyz (bootstrap auto-contenu, pip ≥ 26.1.1).
+PIP_PYZ=$(mktemp /tmp/pip_XXXXXX.pyz)
+trap 'rm -f "$PIP_PYZ"' EXIT
 
-if ! python3 -m pip --version &>/dev/null; then
-  echo "❌ python3 -m pip non disponible."
-  echo "   macOS : brew install python  ou  python3 -m ensurepip"
-  echo "   Linux : sudo apt install python3-pip"
+if command -v curl &>/dev/null; then
+  echo "→ Téléchargement de pip bootstrap (pip.pyz)..."
+  curl -fsSL "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ" 2>/dev/null
+elif command -v wget &>/dev/null; then
+  wget -q "https://bootstrap.pypa.io/pip/pip.pyz" -O "$PIP_PYZ" 2>/dev/null
+else
+  echo "❌ curl ou wget requis pour télécharger pip bootstrap."
   exit 1
 fi
+
+if ! python3 "$PIP_PYZ" --version &>/dev/null; then
+  echo "❌ Impossible d'utiliser pip.pyz avec python3."
+  exit 1
+fi
+
+PIP="python3 $PIP_PYZ"
 
 echo "⬇️  Téléchargement des wheels Python pour le snap..."
 echo "   Plateforme cible : linux x86_64 / Python 3.12 (core24)"
 echo "   Destination      : $WHEELS_DIR"
+echo "   pip              : $($PIP --version)"
 echo ""
 
 # ---------------------------------------------------------------------------

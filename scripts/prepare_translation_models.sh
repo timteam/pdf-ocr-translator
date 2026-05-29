@@ -1,317 +1,215 @@
 #!/bin/bash
 #
-# Script de préparation des modèles de traduction OPUS-MT
+# Prépare les modèles de traduction Opus-MT pour le graphe de pivots.
 #
-# Ce script télécharge et prépare les modèles de traduction nécessaires
-# pour le graphe de pivots défini dans translation_service.dart.
+# Télécharge les modèles PyTorch depuis Helsinki-NLP (HuggingFace) et les
+# convertit au format CTranslate2 INT8 via un venv temporaire.
 #
-# Architecture : étoile centrée sur l'anglais (en)
-#   - Source → EN  (modèles pivot entrants)
-#   - EN → Cible  (modèles pivot sortants)
+# Usage :
+#   ./prepare_translation_models.sh [OPTIONS] [DEST_DIR]
 #
-# Usage:
-#   ./prepare_translation_models.sh [dest_dir]
+# Options :
+#   -h, --help     Affiche cette aide
+#   -l, --list     Liste les modèles sans télécharger
+#   -s, --small    Télécharge 4 modèles seulement (test rapide)
+#   -v, --verbose  Mode verbeux
+#   --clean        Supprime et reconvertit les modèles déjà présents
 #
-# Si dest_dir n'est pas spécifié, utilise :
-#   - flutter_app/assets/translation_models/ (par défaut)
+# DEST_DIR : flutter_app/assets/translation_models/ par défaut
 #
-# Nécessite :
-#   - ctranslate2 (pour la conversion des modèles)
-#   - git-lfs (pour télécharger les modèles)
-#   - Python 3.10+
-#
+# Prérequis :
+#   python3 + python3-venv (sudo apt install python3-venv)
+#   ~2 GB d'espace libre (venv temporaire + modèles)
+#   ~1 h (premier run, dépend de la connexion)
 
 set -euo pipefail
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_DEST="$SCRIPT_DIR/../flutter_app/assets/translation_models"
 
-# Répertoire de destination par défaut
-DEFAULT_DEST="flutter_app/assets/translation_models"
-
-# Organisation des modèles OPUS-MT sur HuggingFace
-# Format : HF_REPO:MODEL_NAME
-declare -A MODEL_MAP=(
+# ─── Graphe de modèles ────────────────────────────────────────────────────────
+# Clé  = nom du répertoire de sortie (= ce que translation_service.dart attend)
+# Valeur = repo HuggingFace Helsinki-NLP
+declare -A MODEL_HF=(
   # Pivot entrants : Source → Anglais
-  ["ja-en"]="Helsinki-NLP/opus-mt-ja-en:opus-mt-ja-en"
-  ["zh-en"]="Helsinki-NLP/opus-mt-zh-en:opus-mt-zh-en"
-  ["ko-en"]="Helsinki-NLP/opus-mt-ko-en:opus-mt-ko-en"
-  ["ru-en"]="Helsinki-NLP/opus-mt-ru-en:opus-mt-ru-en"
-  ["ar-en"]="Helsinki-NLP/opus-mt-ar-en:opus-mt-ar-en"
-  ["hi-en"]="Helsinki-NLP/opus-mt-hi-en:opus-mt-hi-en"
-  ["th-en"]="Helsinki-NLP/opus-mt-th-en:opus-mt-th-en"
-  ["vi-en"]="Helsinki-NLP/opus-mt-vi-en:opus-mt-vi-en"
-  ["de-en"]="Helsinki-NLP/opus-mt-de-en:opus-mt-de-en"
-  ["nl-en"]="Helsinki-NLP/opus-mt-nl-en:opus-mt-nl-en"
-  ["pl-en"]="Helsinki-NLP/opus-mt-pl-en:opus-mt-pl-en"
-  ["ROMANCE-en"]="Helsinki-NLP/opus-mt-ROMANCE-en:opus-mt-ROMANCE-en"
+  ["ja-en"]="Helsinki-NLP/opus-mt-ja-en"
+  ["zh-en"]="Helsinki-NLP/opus-mt-zh-en"
+  ["ko-en"]="Helsinki-NLP/opus-mt-ko-en"
+  ["ru-en"]="Helsinki-NLP/opus-mt-ru-en"
+  ["ar-en"]="Helsinki-NLP/opus-mt-ar-en"
+  ["hi-en"]="Helsinki-NLP/opus-mt-hi-en"
+  ["th-en"]="Helsinki-NLP/opus-mt-th-en"
+  ["vi-en"]="Helsinki-NLP/opus-mt-vi-en"
+  ["de-en"]="Helsinki-NLP/opus-mt-de-en"
+  ["nl-en"]="Helsinki-NLP/opus-mt-nl-en"
+  ["pl-en"]="Helsinki-NLP/opus-mt-pl-en"
+  ["ROMANCE-en"]="Helsinki-NLP/opus-mt-ROMANCE-en"   # fr, es, it, pt → en
 
   # Pivot sortants : Anglais → Cible
-  ["en-ROMANCE"]="Helsinki-NLP/opus-mt-en-ROMANCE:opus-mt-en-ROMANCE"
-  ["en-zh"]="Helsinki-NLP/opus-mt-en-zh:opus-mt-en-zh"
-  ["en-de"]="Helsinki-NLP/opus-mt-en-de:opus-mt-en-de"
-  ["en-nl"]="Helsinki-NLP/opus-mt-en-nl:opus-mt-en-nl"
-  ["en-ru"]="Helsinki-NLP/opus-mt-en-ru:opus-mt-en-ru"
-  ["en-hi"]="Helsinki-NLP/opus-mt-en-hi:opus-mt-en-hi"
-  ["en-vi"]="Helsinki-NLP/opus-mt-en-vi:opus-mt-en-vi"
-  ["en-mul"]="Helsinki-NLP/opus-mt-en-mul:opus-mt-en-mul"
-  ["en-sla"]="Helsinki-NLP/opus-mt-en-sla:opus-mt-en-sla"
-
-  # Modèles TC-Big (Transformers + CTranslate2 optimisés)
-  ["tc-big-en-ar"]="argostranslate/argos-opus-en-ar:tc-big"
-  ["tc-big-en-ko"]="argostranslate/argos-opus-en-ko:tc-big"
+  ["en-ROMANCE"]="Helsinki-NLP/opus-mt-en-ROMANCE"   # en → fr (>>fr<<), es, it, pt
+  ["en-de"]="Helsinki-NLP/opus-mt-en-de"
+  ["en-nl"]="Helsinki-NLP/opus-mt-en-nl"
+  ["en-ru"]="Helsinki-NLP/opus-mt-en-ru"
+  ["en-hi"]="Helsinki-NLP/opus-mt-en-hi"
+  ["en-zh"]="Helsinki-NLP/opus-mt-en-zh"             # token >>cmn<<
+  ["en-ar"]="Helsinki-NLP/opus-mt-en-ar"             # token >>ara<<  (garder aussi tc-big)
+  ["en-vi"]="Helsinki-NLP/opus-mt-en-vi"             # token >>vie<<
+  ["en-mul"]="Helsinki-NLP/opus-mt-en-mul"           # token >>jpn<< >>tha<<
+  ["en-sla"]="Helsinki-NLP/opus-mt-en-sla"           # token >>pol<<
+  ["tc-big-en-ar"]="Helsinki-NLP/opus-mt-tc-big-en-ar"  # token >>ara<< (qualité supérieure)
+  ["tc-big-en-ko"]="Helsinki-NLP/opus-mt-tc-big-en-ko"  # en → ko (dédié)
 )
 
-# Modèles à télécharger (tous)
 ALL_MODELS=(
   "ja-en" "zh-en" "ko-en" "ru-en" "ar-en" "hi-en" "th-en" "vi-en"
   "de-en" "nl-en" "pl-en" "ROMANCE-en"
-  "en-ROMANCE" "en-zh" "en-de" "en-nl" "en-ru" "en-hi" "en-vi"
-  "en-mul" "en-sla"
-  "tc-big-en-ar" "tc-big-en-ko"
+  "en-ROMANCE" "en-de" "en-nl" "en-ru" "en-hi" "en-zh" "en-ar"
+  "en-vi" "en-mul" "en-sla" "tc-big-en-ar" "tc-big-en-ko"
 )
 
-# ============================================================================
-# FONCTIONS
-# ============================================================================
+# 4 modèles pour test rapide (clés valides dans MODEL_HF)
+SMALL_MODELS=("ja-en" "ROMANCE-en" "en-ROMANCE" "en-de")
 
-# Affiche l'aide
+# ─── Aide ─────────────────────────────────────────────────────────────────────
 usage() {
   cat <<EOF
 Usage: $0 [OPTIONS] [DEST_DIR]
 
-Télécharge et prépare les modèles de traduction pour le graphe de pivots.
+Convertit les modèles Helsinki-NLP opus-mt en CTranslate2 INT8.
+Destination par défaut : flutter_app/assets/translation_models/
 
-Arguments:
-  DEST_DIR       Répertoire de destination (défaut: $DEFAULT_DEST)
+OPTIONS
+  -h, --help     Cette aide
+  -l, --list     Liste les modèles sans télécharger
+  -s, --small    4 modèles seulement (ja-en, ROMANCE-en, en-ROMANCE, en-de)
+  -v, --verbose  Mode verbeux (logs Python visibles)
+  --clean        Reconvertit les modèles déjà présents
 
-Options:
-  -h, --help     Affiche cette aide
-  -l, --list     Liste les modèles disponibles sans télécharger
-  -s, --small    Télécharge seulement les modèles petits (pour test)
-  -v, --verbose  Mode verbeux
-  --clean        Supprime les modèles existants avant téléchargement
-
-Exemples:
-  $0                              # Télécharge tout dans $DEFAULT_DEST
-  $0 flutter_app/assets/translation_models
-  $0 --list                       # Liste les modèles sans télécharger
-  $0 --small my_models/           # Télécharge un sous-ensemble
+EXEMPLES
+  $0                         # Tout convertir dans le répertoire par défaut
+  $0 --small                 # Test rapide (4 modèles)
+  $0 --list                  # Voir la liste sans télécharger
+  $0 --clean en-ROMANCE      # Reconvertir un seul modèle
 EOF
 }
 
-# Affiche la liste des modèles
+# ─── Liste des modèles ────────────────────────────────────────────────────────
 display_model_list() {
-  echo "Modèles de traduction disponibles (graphe de pivots):"
-  echo ""
-  echo "=== PIVOT ENTRANTS (Source → Anglais) ==="
-  for model in "${!MODEL_MAP[@]}"; do
-    if [[ $model == *"-en" ]]; then
-      printf "  %-20s %s\n" "$model" "${MODEL_MAP[$model]}"
-    fi
+  printf "%-20s %-45s\n" "RÉPERTOIRE" "REPO HUGGINGFACE"
+  printf "%-20s %-45s\n" "---" "---"
+  printf "\n=== PIVOT ENTRANTS (Source → Anglais) ===\n"
+  for key in "ja-en" "zh-en" "ko-en" "ru-en" "ar-en" "hi-en" "th-en" "vi-en" \
+             "de-en" "nl-en" "pl-en" "ROMANCE-en"; do
+    printf "  %-18s %s\n" "$key" "${MODEL_HF[$key]}"
+  done
+  printf "\n=== PIVOT SORTANTS (Anglais → Cible) ===\n"
+  for key in "en-ROMANCE" "en-de" "en-nl" "en-ru" "en-hi" "en-zh" "en-ar" \
+             "en-vi" "en-mul" "en-sla" "tc-big-en-ar" "tc-big-en-ko"; do
+    printf "  %-18s %s\n" "$key" "${MODEL_HF[$key]}"
   done
   echo ""
-  echo "=== PIVOT SORTANTS (Anglais → Cible) ==="
-  for model in "${!MODEL_MAP[@]}"; do
-    if [[ $model == "en-"* ]]; then
-      printf "  %-20s %s\n" "$model" "${MODEL_MAP[$model]}"
-    fi
-  done
-  echo ""
-  echo "Total: ${#MODEL_MAP[@]} modèles"
+  echo "Total : ${#MODEL_HF[@]} modèles"
 }
 
-# Vérifie les dépendances
-check_dependencies() {
-  local missing=()
+# ─── Venv de conversion ───────────────────────────────────────────────────────
+VENV_DIR=""
 
-  command -v curl >/dev/null 2>&1 || missing+=("curl")
-  command -v python3 >/dev/null 2>&1 || missing+=("python3")
-  command -v pip >/dev/null 2>&1 || missing+=("pip")
+setup_venv() {
+  VENV_DIR=$(mktemp -d /tmp/ct2conv_XXXXXXXX)
 
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "ERREUR: Dépendances manquantes: ${missing[*]}"
-    echo ""
-    echo "Installez-les avec :"
-    echo "  Ubuntu/Debian: sudo apt-get install curl python3 python3-pip"
-    echo "  macOS: brew install curl python"
+  echo "→ Venv temporaire : $VENV_DIR"
+  echo "  Installation : ctranslate2, transformers, torch (CPU), sentencepiece, sacremoses"
+  echo "  (Premier run : ~5-10 min selon la connexion)"
+  echo ""
+
+  if ! python3 -m venv "$VENV_DIR" 2>/dev/null; then
+    echo "❌ python3 -m venv a échoué."
+    echo "   Installe python3-venv : sudo apt install python3-venv"
+    echo "   puis relance ce script."
     exit 1
   fi
 
-  # Vérifie ctranslate2
-  if ! python3 -c "import ctranslate2" 2>/dev/null; then
-    echo "Installation de ctranslate2..."
-    pip install ctranslate2[cpu] --quiet
-  fi
+  "$VENV_DIR/bin/pip" install --upgrade pip --quiet
 
-  echo "✓ Toutes les dépendances sont installées"
+  # torch CPU uniquement (~500 MB vs 2 GB pour CUDA)
+  "$VENV_DIR/bin/pip" install \
+    ctranslate2 \
+    "transformers>=4.30" \
+    sentencepiece \
+    sacremoses \
+    --quiet
+
+  "$VENV_DIR/bin/pip" install \
+    torch --index-url https://download.pytorch.org/whl/cpu \
+    --quiet
+
+  echo "→ Venv prêt : $("$VENV_DIR/bin/pip" show ctranslate2 | grep ^Version)"
+  echo ""
 }
 
-# Convertit un modèle HuggingFace en format CTranslate2
-# Utilise curl pour télécharger directement depuis HuggingFace (sans git-lfs)
+cleanup_venv() {
+  if [[ -n "$VENV_DIR" && -d "$VENV_DIR" ]]; then
+    rm -rf "$VENV_DIR"
+  fi
+}
+trap cleanup_venv EXIT
+
+# ─── Conversion d'un modèle ───────────────────────────────────────────────────
 convert_model() {
-  local hf_repo="$1"
-  local output_dir="$2"
-  local model_name="$3"
+  local key="$1"      # ex: "ja-en"
+  local dest="$2"     # ex: "flutter_app/assets/translation_models/ja-en"
+  local hf_id="${MODEL_HF[$key]}"
+  local quiet_flag=""
+  [[ "$VERBOSE" == false ]] && quiet_flag="2>/dev/null"
 
-  echo "  Conversion de $model_name depuis $hf_repo..."
+  mkdir -p "$dest"
 
-  # Crée un répertoire temporaire pour la conversion
-  local tmp_dir=$(mktemp -d)
-  trap "rm -rf $tmp_dir" EXIT
-
-  # Extrait le nom du modèle depuis la configuration
-  local hf_model="${MODEL_MAP[$model_name]}"
-  # Si le format est REPO:MODEL, extraire le modèle
-  if [[ "$hf_model" == *":"* ]]; then
-    hf_model=$(echo "$hf_model" | cut -d':' -f2)
-  else
-    hf_model="$hf_model"
-  fi
-
-  # Télécharge le répertoire du modèle via curl + HF API
-  # HuggingFace : https://huggingface.co/{repo}/resolve/main/{file}
-  local model_url="https://huggingface.co/${hf_repo}"
-  local model_path="$tmp_dir/model"
-  mkdir -p "$model_path"
-
-  # Télécharge tous les fichiers nécessaires depuis HuggingFace
-  # Pour les modèles Transformers, on a besoin de :
-  # - config.json
-  # - pytorch_model.bin (ou tf_model.h5)
-  # - tokenizer.json / tokenizer_config.json
-  # - special_tokens_map.json
-  # - vocab.txt (ou sentencepiece.bpe.model, etc.)
-  
-  echo "  Téléchargement des fichiers depuis HuggingFace..."
-  
-  # Liste des fichiers à télécharger pour un modèle OPUS-MT
-  local files_to_download=(
-    "config.json"
-    "pytorch_model.bin"
-    "tokenizer.json"
-    "tokenizer_config.json"
-    "special_tokens_map.json"
-    "source.spm"
-    "target.spm"
-    "sentencepiece.bpe.model"
-    "vocab.json"
-  )
-
-  for file in "${files_to_download[@]}"; do
-    if curl -s -f -L "${model_url}/resolve/main/${file}" -o "${model_path}/${file}" 2>/dev/null; then
-      echo "    ✓ Téléchargé: $file"
-    else
-      # Essayer sans resolve/main
-      if curl -s -f -L "${model_url}/${file}" -o "${model_path}/${file}" 2>/dev/null; then
-        echo "    ✓ Téléchargé: $file (chemin direct)"
-      else
-        echo "    ⚠ Non trouvé: $file"
-      fi
-    fi
-  done
-
-  # Vérifier qu'on a au moins pytorch_model.bin ou un fichier de poids
-  if [ ! -f "${model_path}/pytorch_model.bin" ] && [ ! -f "${model_path}/model.safetensors" ] && [ ! -f "${model_path}/model.bin" ]; then
-    echo "  ❌ Aucun fichier de poids trouvé pour ${model_name}"
-    return 1
-  fi
-
-  # Convertit en CTranslate2
-  python3 - <<PYEOF
+  # Script Python de conversion injecté en heredoc
+  local py_script
+  py_script=$(mktemp /tmp/ct2_convert_XXXXXXXX.py)
+  cat > "$py_script" <<'PYEOF'
+import sys, os, glob, shutil, tempfile
 import ctranslate2
-import os
-import shutil
+from transformers import MarianTokenizer
 
-model_path = "$tmp_dir/model"
-output_path = "$output_dir"
+hf_id, out_dir = sys.argv[1], sys.argv[2]
 
-# Charge le modèle Transformers
-model = ctranslate2.converters.TransformersConverter().convert(
-    model_path,
-    output_dir=output_path,
-    quantization="int8",
-    force=True
-)
+print(f"  OpusMTConverter({hf_id})...")
+converter = ctranslate2.converters.OpusMTConverter(hf_id)
+converter.convert(out_dir, quantization="int8", force=True)
+print(f"  model.bin + shared_vocabulary.json générés")
 
-# Copie les fichiers SentencePiece depuis le modèle source
-sp_files = ["source.spm", "target.spm", "sentencepiece.bpe.model", "vocab.json"]
-for sp_file in sp_files:
-    src = os.path.join(model_path, sp_file)
-    if os.path.exists(src):
-        shutil.copy2(src, output_path)
-        print(f"  ✓ SentencePiece copié: {sp_file}")
+print(f"  Tokenizer : source.spm / target.spm...")
+with tempfile.TemporaryDirectory() as tmp:
+    tok = MarianTokenizer.from_pretrained(hf_id)
+    tok.save_pretrained(tmp)
+    copied = []
+    for pattern in ("*.spm", "*.model"):
+        for f in glob.glob(os.path.join(tmp, pattern)):
+            dst = os.path.join(out_dir, os.path.basename(f))
+            if not os.path.exists(dst):
+                shutil.copy(f, dst)
+                copied.append(os.path.basename(f))
+    if copied:
+        print(f"  Copiés : {', '.join(copied)}")
+    else:
+        print(f"  Fichiers SPM déjà présents")
 
-print(f"  ✓ Modèle converti: {output_path}")
+size = sum(os.path.getsize(os.path.join(out_dir, f))
+           for f in os.listdir(out_dir)) / 1024 / 1024
+print(f"  ✓ {out_dir} ({size:.0f} MB)")
 PYEOF
 
-  # Nettoyage : garde seulement les fichiers nécessaires
-  if [ -d "$output_dir" ]; then
-    # Supprime les fichiers inutiles (mais garde vocab*.txt pour SPM)
-    find "$output_dir" -name "*.txt" -not -name "vocab*" -delete 2>/dev/null || true
-    find "$output_dir" -name "*.md" -delete 2>/dev/null || true
-    find "$output_dir" -name "config.json" -delete 2>/dev/null || true
-  fi
-}
-
-# Télécharge et prépare un modèle
-prepare_model() {
-  local model_name="$1"
-  local dest_dir="$2"
-  local model_output_dir="$dest_dir/$model_name"
-
-  echo "Préparation du modèle: $model_name"
-
-  # Vérifie si le modèle existe déjà
-  if [ -d "$model_output_dir" ] && [ "$(ls -A "$model_output_dir" 2>/dev/null)" ]; then
-    echo "  ✓ Modèle existe déjà: $model_name"
-    return 0
+  if [[ "$VERBOSE" == true ]]; then
+    "$VENV_DIR/bin/python3" "$py_script" "$hf_id" "$dest"
+  else
+    "$VENV_DIR/bin/python3" "$py_script" "$hf_id" "$dest" 2>/dev/null
   fi
 
-  mkdir -p "$model_output_dir"
-
-  # Récupère la configuration du modèle
-  local hf_info="${MODEL_MAP[$model_name]}"
-  local hf_repo=$(echo "$hf_info" | cut -d':' -f1)
-  local hf_model=$(echo "$hf_info" | cut -d':' -f2)
-
-  # Télécharge et convertit
-  convert_model "$hf_repo" "$model_output_dir" "$model_name"
-
-  # Crée un fichier README avec la configuration
-  cat > "$model_output_dir/README.md" <<EOF
-# Modèle de traduction: $model_name
-
-- **Source**: $hf_repo
-- **Modèle**: $hf_model
-- **Format**: CTranslate2 (quantifié INT8)
-- **Taille**: $(du -sh "$model_output_dir" | cut -f1)
-
-Généré par: $0
-Date: $(date)
-EOF
-
-  echo "  ✓ Modèle prêt: $model_name"
+  rm -f "$py_script"
 }
 
-# ============================================================================
-# MODE SMALL (pour test)
-# ============================================================================
-
-# Sous-ensemble de modèles pour test rapide
-SMALL_MODELS=(
-  "fr-en"    # ROMANCE-en pour test (petit)
-  "en-fr"    # en-ROMANCE pour test
-  "de-en"
-  "en-de"
-)
-
-# ============================================================================
-# MAIN
-# ============================================================================
-
-# Parse les arguments
+# ─── Parse arguments ──────────────────────────────────────────────────────────
 VERBOSE=false
 LIST_ONLY=false
 SMALL_MODE=false
@@ -320,112 +218,77 @@ DEST_DIR="$DEFAULT_DEST"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    -l|--list)
-      LIST_ONLY=true
-      shift
-      ;;
-    -s|--small)
-      SMALL_MODE=true
-      shift
-      ;;
-    -v|--verbose)
-      VERBOSE=true
-      shift
-      ;;
-    --clean)
-      CLEAN=true
-      shift
-      ;;
-    -*)
-      echo "Option inconnue: $1"
-      usage
-      exit 1
-      ;;
-    *)
-      DEST_DIR="$1"
-      shift
-      ;;
+    -h|--help)   usage; exit 0 ;;
+    -l|--list)   LIST_ONLY=true; shift ;;
+    -s|--small)  SMALL_MODE=true; shift ;;
+    -v|--verbose) VERBOSE=true; shift ;;
+    --clean)     CLEAN=true; shift ;;
+    -*)          echo "Option inconnue : $1"; usage; exit 1 ;;
+    *)           DEST_DIR="$1"; shift ;;
   esac
 done
 
-# Affiche la liste si demandé
-if [ "$LIST_ONLY" = true ]; then
+# ─── Liste seule ─────────────────────────────────────────────────────────────
+if [[ "$LIST_ONLY" == true ]]; then
   display_model_list
   exit 0
 fi
 
-# Vérifie les dépendances
-if [ "$LIST_ONLY" = false ]; then
-  echo "Vérification des dépendances..."
-  check_dependencies
-  echo ""
-fi
-
-# Détermine les modèles à télécharger
-if [ "$SMALL_MODE" = true ]; then
-  echo "Mode SMALL: Téléchargement de ${#SMALL_MODELS[@]} modèles seulement"
-  MODELS_TO_DOWNLOAD=("${SMALL_MODELS[@]}")
+# ─── Sélection des modèles ───────────────────────────────────────────────────
+if [[ "$SMALL_MODE" == true ]]; then
+  MODELS_TO_DO=("${SMALL_MODELS[@]}")
+  echo "Mode --small : ${#MODELS_TO_DO[@]} modèles (${MODELS_TO_DO[*]})"
 else
-  echo "Téléchargement de tous les modèles (${#ALL_MODELS[@]})"
-  MODELS_TO_DOWNLOAD=("${ALL_MODELS[@]}")
+  MODELS_TO_DO=("${ALL_MODELS[@]}")
+  echo "Conversion de ${#MODELS_TO_DO[@]} modèles → $DEST_DIR"
 fi
+echo ""
 
-# Nettoyage si demandé
-if [ "$CLEAN" = true ]; then
-  echo "Nettoyage du répertoire de destination..."
-  rm -rf "$DEST_DIR"
-  mkdir -p "$DEST_DIR"
-fi
-
-# Crée le répertoire de destination
 mkdir -p "$DEST_DIR"
 
-# Télécharge chaque modèle
-echo ""
-echo "Début du téléchargement..."
-echo "Répertoire de destination: $(realpath "$DEST_DIR")"
-echo ""
+# ─── Venv ─────────────────────────────────────────────────────────────────────
+setup_venv
 
-TOTAL=${#MODELS_TO_DOWNLOAD[@]}
+# ─── Boucle de conversion ────────────────────────────────────────────────────
+TOTAL=${#MODELS_TO_DO[@]}
 COUNT=0
 FAILED=()
 
-for model in "${MODELS_TO_DOWNLOAD[@]}"; do
+for key in "${MODELS_TO_DO[@]}"; do
   COUNT=$((COUNT + 1))
-  echo "[$COUNT/$TOTAL] $model"
+  out_dir="$DEST_DIR/$key"
 
-  if prepare_model "$model" "$DEST_DIR"; then
-    : # Succès
+  if [[ "$CLEAN" == false && -f "$out_dir/model.bin" ]]; then
+    echo "[$COUNT/$TOTAL] $key — déjà converti, ignoré (--clean pour forcer)"
+    continue
+  fi
+
+  echo "[$COUNT/$TOTAL] $key (${MODEL_HF[$key]})..."
+
+  if convert_model "$key" "$out_dir"; then
+    echo "  ✓ $key"
   else
-    FAILED+=("$model")
-    echo "  ✗ ÉCHEC: $model"
+    echo "  ✗ $key — échec"
+    FAILED+=("$key")
+    rm -rf "$out_dir"   # ne pas laisser un répertoire partiel
   fi
   echo ""
 done
 
-# Résumé
-echo "========================================================================"
-echo "SUMMARY"
-echo "========================================================================"
-echo "Modèles réussis: $((TOTAL - ${#FAILED[@]}))/$TOTAL"
+# ─── Résumé ──────────────────────────────────────────────────────────────────
+OK=$((TOTAL - ${#FAILED[@]}))
+echo "════════════════════════════════════════"
+echo "Terminé : $OK/$TOTAL modèles convertis"
+echo "Destination : $(realpath "$DEST_DIR")"
+[[ -d "$DEST_DIR" ]] && echo "Taille totale : $(du -sh "$DEST_DIR" | cut -f1)"
 
-if [ ${#FAILED[@]} -gt 0 ]; then
+if [[ ${#FAILED[@]} -gt 0 ]]; then
   echo ""
-  echo "Modèles en échec (${#FAILED[@]}):"
-  for model in "${FAILED[@]}"; do
-    echo "  - $model"
-  done
+  echo "Échecs (${#FAILED[@]}) :"
+  printf "  %s\n" "${FAILED[@]}"
   echo ""
-  echo "Pour réessayer les modèles en échec:"
-  echo "  $0 --verbose ${FAILED[*]}"
+  echo "Pour réessayer : $0 --clean $(IFS=' '; echo "${FAILED[*]}")"
+  exit 1
 fi
 
-echo ""
-echo "Répertoire de sortie: $(realpath "$DEST_DIR")"
-echo "Taille totale: $(du -sh "$DEST_DIR" | cut -f1)"
-echo ""
-echo "✓ Préparation terminée!"
+echo "✅ Tous les modèles sont prêts."

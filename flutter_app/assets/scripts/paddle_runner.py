@@ -25,138 +25,86 @@ from pathlib import Path
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, line_buffering=True, write_through=True)
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, line_buffering=True, write_through=True)
 
+
+def dbg(msg):
+    sys.stderr.write(f"[runner] {msg}\n")
+
+
 # ── Import conditionnel de OpenCV ───────────────────────────────────────────
-# OpenCV est bundlé dans le snap via opencv-python
 try:
     import cv2
     OPENCV_AVAILABLE = True
 except ImportError:
     OPENCV_AVAILABLE = False
-    dbg("OpenCV non disponible — préprocessing limité")
-
-
-def dbg(msg):
-    sys.stderr.write(f"[runner] {msg}\n")
+    dbg("OpenCV non disponible — préprocessing désactivé")
 
 
 dbg("démarrage")
 
 
 # =============================================================================
-# PRÉPROCESSING AVEC OPENCV (Option B+C)
+# PRÉPROCESSING ADAPTATIF POUR RAPIDOCR/PP-OCRv4
+#
+# Règles déduites du code source RapidOCR 1.4.4 (load_image.py + det utils.py) :
+#
+#   1. RapidOCR attend du BGR 3 canaux (pas de grayscale).
+#      Quand on passe un np.ndarray, il est utilisé tel quel (pas de conversion).
+#      Quand on passe un chemin, PIL l'ouvre en RGB puis le convertit BGR.
+#
+#   2. Normalisation interne détection : (pixel / 255.0 − 0.5) / 0.5 → [-1, 1]
+#      → Toute binarisation (Otsu, adaptive) en amont détruirait cette distribution.
+#
+#   3. Deskew déjà appliqué côté Dart (3 passes, ±85°) — ne pas redoubler.
+#
+# Pipeline recommandé (adaptatif, uniquement si nécessaire) :
+#   • CLAHE sur canal L de LAB si contraste faible (std < 45)
+#   • Unsharp masking si flou détecté (Laplacian var < 150)
+#   • Retourne np.ndarray BGR ou None (= utiliser l'image originale directement)
 # =============================================================================
 
 
-def preprocess_image_cv2(image_path):
-    """
-    Applique un pipeline de préprocessing optimisé pour PP-OCRv4.
-    
-    Pipeline :
-    1. Lecture en niveaux de gris
-    2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    3. Binarisation adaptative (Otsu)
-    4. Deskew (correction d'inclinaison)
-    
-    Retourne : image préprocessée (numpy array)
-    """
+def preprocess_for_rapidocr(image_path):
+    """Préprocessing adaptatif BGR pour RapidOCR. Retourne np.ndarray ou None."""
     if not OPENCV_AVAILABLE:
-        dbg("OpenCV non disponible — retour image originale")
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        return img
-    
+        return None
     try:
-        # 1. Lecture en niveaux de gris
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(image_path)  # BGR natif — aucune conversion
         if img is None:
-            dbg(f"Échec lecture image: {image_path}")
             return None
-        
-        dbg(f"Image originale: {img.shape[1]}x{img.shape[0]} px")
-        
-        # 2. CLAHE - Amélioration du contraste local
-        # clipLimit=2.0, tileGridSize=(8,8) sont les valeurs standard pour OCR
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        img = clahe.apply(img)
-        dbg("CLAHE appliqué")
-        
-        # 3. Binarisation adaptative avec Otsu
-        # THRESH_BINARY_INV car le texte est sombre sur fond clair
-        _, img = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        dbg("Thresholding Otsu appliqué")
-        
-        # 4. Deskew via analyse des lignes de texte
-        img = deskew_cv2(img)
-        dbg("Deskew appliqué")
-        
-        dbg(f"Image préprocessée: {img.shape[1]}x{img.shape[0]} px")
-        return img
-        
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        contrast = float(gray.std())
+        laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        dbg(f"qualité image : contrast={contrast:.1f} laplacian={laplacian_var:.0f}")
+
+        modified = False
+
+        # CLAHE sur canal L (LAB) — préserve la couleur, améliore le contraste local
+        if contrast < 45:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            l_ch, a_ch, b_ch = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            img = cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]),
+                               cv2.COLOR_LAB2BGR)
+            dbg(f"CLAHE appliqué (contrast {contrast:.1f} < 45)")
+            modified = True
+
+        # Unsharp masking — renforce les bords pour DBNet
+        if laplacian_var < 150:
+            blur = cv2.GaussianBlur(img, (0, 0), 2.0)
+            img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
+            dbg(f"unsharp masking appliqué (laplacian {laplacian_var:.0f} < 150)")
+            modified = True
+
+        if not modified:
+            dbg("image qualité OK — aucun préprocessing externe appliqué")
+            return None  # RapidOCR lira l'original directement
+
+        return img  # np.ndarray BGR → passé directement à ocr()
+
     except Exception as e:
-        dbg(f"Erreur préprocessing: {e}")
-        # Retourne l'image originale en grayscale
-        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        return img if img is not None else None
-
-
-def deskew_cv2(img):
-    """
-    Corrige l'inclinaison de l'image via OpenCV (beaucoup plus rapide que Dart).
-    
-    Méthode :
-    - Détecte les contours du texte
-    - Calcule l'angle moyen via minAreaRect
-    - Applique la rotation inverse
-    """
-    if not OPENCV_AVAILABLE:
-        return img
-    
-    try:
-        # Trouver les pixels noirs (texte)
-        coords = np.column_stack(np.where(img < 200))
-        
-        if len(coords) < 100:  # Pas assez de texte détecté
-            dbg("Pas assez de texte pour deskew")
-            return img
-        
-        # Calculer l'angle via minAreaRect
-        rect = cv2.minAreaRect(coords)
-        angle = rect[2]
-        
-        # Corriger l'angle (OpenCV retourne l'angle de la largeur, pas de la hauteur)
-        if angle < -45:
-            angle = -(90 + angle)
-        else:
-            angle = -angle
-        
-        dbg(f"Angle détecté: {angle:.2f}°")
-        
-        # Ne pas corriger si angle négligeable
-        if abs(angle) < 0.5:
-            dbg("Inclinaison négligeable (< 0.5°)")
-            return img
-        
-        # Rotation
-        (h, w) = img.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        img = cv2.warpAffine(
-            img, 
-            M, 
-            (w, h), 
-            flags=cv2.INTER_CUBIC, 
-            borderMode=cv2.BORDER_REPLICATE
-        )
-        dbg(f"Image tournée de {angle:.2f}°")
-        return img
-        
-    except Exception as e:
-        dbg(f"Erreur deskew: {e}")
-        return img
-
-
-# =============================================================================
-# FIN PRÉPROCESSING
-# =============================================================================
+        dbg(f"préprocessing échoué : {e}")
+        return None
 
 
 # ── Localisation des modèles ONNX ─────────────────────────────────────────────
@@ -332,11 +280,13 @@ def is_latin_or_empty(text):
 
 
 def run_detect(image_path):
+    img_input = preprocess_for_rapidocr(image_path) or image_path
+
     # ── Passe 1 : modèle ch ───────────────────────────────────────────────────
     dbg("passe 1 : ch")
     ocr_ch = make_ocr("ch")
     dbg("passe 1 : predict…")
-    res_ch, _ = ocr_ch(image_path)
+    res_ch, _ = ocr_ch(img_input)
     dbg("passe 1 : predict OK")
     text_ch = result_to_text(res_ch)
     script_ch = detect_dominant_script(text_ch)
@@ -351,7 +301,7 @@ def run_detect(image_path):
         dbg("passe 2 : japan")
         ocr_jp = make_ocr("japan")
         dbg("passe 2 : predict…")
-        res_jp, _ = ocr_jp(image_path)
+        res_jp, _ = ocr_jp(img_input)
         dbg("passe 2 : predict OK")
         text_jp = result_to_text(res_jp)
         script_jp = detect_dominant_script(text_jp)
@@ -373,36 +323,12 @@ def run_detect(image_path):
 def run_ocr(image_path, bcp47_lang):
     model_key = LANG_TO_MODEL.get(bcp47_lang, "ch")
     dbg(f"run_ocr : lang={bcp47_lang} → model={model_key}")
-    
-    # Appliquer le préprocessing avec OpenCV si disponible
-    if OPENCV_AVAILABLE:
-        dbg("Préprocessing OpenCV activé…")
-        try:
-            # Sauvegarder l'image préprocessée dans un fichier temporaire
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                tmp_path = tmp.name
-            
-            processed_img = preprocess_image_cv2(image_path)
-            if processed_img is not None:
-                cv2.imwrite(tmp_path, processed_img)
-                dbg(f"Image préprocessée sauvegardée: {tmp_path}")
-                image_path = tmp_path
-                
-                # Nettoyer après OCR
-                import atexit
-                def cleanup():
-                    try:
-                        os.unlink(tmp_path)
-                    except:
-                        pass
-                atexit.register(cleanup)
-        except Exception as e:
-            dbg(f"Préprocessing échoué, utilisation image originale: {e}")
-    
+    # Préprocessing adaptatif : retourne np.ndarray BGR ou None
+    # Si None → RapidOCR charge l'original via PIL (légère conversion RGB→BGR interne)
+    img_input = preprocess_for_rapidocr(image_path) or image_path
     ocr = make_ocr(model_key)
     dbg("run_ocr : predict…")
-    result, _ = ocr(image_path)
+    result, _ = ocr(img_input)
     dbg("run_ocr : predict OK")
     blocks = result_to_blocks(result)
     dbg(f"run_ocr : {len(blocks)} blocs")

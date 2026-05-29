@@ -1,6 +1,6 @@
 # PDF OCR Translator
 
-Application de traduction PDF entièrement locale — sans backend ni service distant
+Application Flutter Linux desktop qui traduit des PDFs image **entièrement hors-ligne** — aucune donnée ne quitte l'appareil.
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![Flutter](https://img.shields.io/badge/Flutter-3.16+-blue.svg)
@@ -8,370 +8,158 @@ Application de traduction PDF entièrement locale — sans backend ni service di
 
 ---
 
-## Présentation
+## Ce que ça fait
 
-`PDF OCR Translator` est une application **Flutter Linux desktop** qui extrait du texte depuis des PDFs image via **OCR**, le traduit en utilisant un **graphe de pivots linguistiques**, et génère un PDF de sortie avec le texte traduit superposé sur chaque page. **Tout le traitement se fait localement** sur l'appareil — aucune donnée n'est envoyée vers un serveur tiers.
+1. Tu sélectionnes un PDF (scanné, photo de document, etc.)
+2. L'application détecte automatiquement la langue de chaque page
+3. Tu confirmes (et surcharges si besoin) avant de lancer
+4. L'OCR extrait chaque bloc de texte avec sa position
+5. La traduction est appliquée hors-ligne via un graphe de modèles
+6. Un nouveau PDF est généré avec le texte traduit superposé sur les pages originales
 
----
-
-## Fonctionnalités
-
-- **Extraction OCR** depuis des pages PDF image (PaddleOCR PP-OCRv4 via ONNX Runtime)
-- **Détection automatique de la langue source** page par page (FastText LID 176 langues + analyse Unicode)
-- **Confirmation et personnalisation** par page avant traduction
-- **Traduction hors-ligne** vers 16 langues via **graphe de pivots** (Opus-MT + CTranslate2)
-- **Génération d'un PDF de sortie** avec textes en surimpression
-- Choix du chemin et nom du fichier de sortie avant le lancement
-- Indicateur de progression détaillé par page et par étape
-- Mode debug : images intermédiaires et logs exportés dans un répertoire configurable
+**Tout se passe localement.** Pas d'API, pas de clé, pas d'internet requis à l'exécution.
 
 ---
 
-## Architecture du Graphe de Pivots
-
-Le système de traduction utilise une **architecture en étoile** centrée sur l'anglais (en) :
+## Pipeline
 
 ```
-     ┌─────────────┐
-     │   Source    │
-     └──────┬──────┘
+PDF source
+  │
+  ├── pdfinfo ──────────────────────────── nombre de pages
+  │
+  ├── Phase 1 — Détection de langue
+  │     pdftoppm 150 DPI → PNG
+  │     paddle_runner.py (RapidOCR, 3 passes) + fasttext_detect.py
+  │     → code langue BCP-47 par page
+  │
+  ├── Écran de confirmation
+  │     miniatures + langues détectées, personnalisation optionnelle par page
+  │
+  ├── Phase 2 — Traduction
+  │     pdftoppm 600 DPI → PNG
+  │     paddle_runner.py → blocs texte + bounding boxes
+  │     opusmt_translate.py → Opus-MT (CTranslate2) via graphe de pivots
+  │     compute() → PDF de page (isolate Flutter)
+  │
+  └── pdfunite ─────────────────────────── PDF de sortie assemblé
+```
+
+---
+
+## Graphe de pivots de traduction
+
+La traduction passe toujours par l'anglais comme langue pivot centrale.
+
+```
+          Source
             │
-     ┌──────▼──────┐
-     │   Anglais    │◄─────── Pivot Central
-     │    (en)      │
-     └──────┬──────┘
+       [source → en]   ← modèle pivot entrant
             │
-     ┌──────▼──────┐
-     │   Cible     │
-     └─────────────┘
+        ANGLAIS
+            │
+        [en → cible]   ← modèle pivot sortant
+            │
+          Cible
 ```
 
-### Pivots Entrants (Source → Anglais)
+**Exemple :** japonais → français = `ja-en` (opus-mt-ja-en) + `en-ROMANCE` (token `>>fr<<`)
 
-| Modèle | Langues | Source HuggingFace |
-|--------|---------|-------------------|
-| `ja-en` | Japonais → Anglais | Helsinki-NLP/opus-mt-ja-en |
-| `zh-en` | Chinois → Anglais | Helsinki-NLP/opus-mt-zh-en |
-| `ko-en` | Coréen → Anglais | Helsinki-NLP/opus-mt-ko-en |
-| `ru-en` | Russe → Anglais | Helsinki-NLP/opus-mt-ru-en |
-| `ar-en` | Arabe → Anglais | Helsinki-NLP/opus-mt-ar-en |
-| `hi-en` | Hindi → Anglais | Helsinki-NLP/opus-mt-hi-en |
-| `th-en` | Thaï → Anglais | Helsinki-NLP/opus-mt-th-en |
-| `vi-en` | Vietnamien → Anglais | Helsinki-NLP/opus-mt-vi-en |
-| `de-en` | Allemand → Anglais | Helsinki-NLP/opus-mt-de-en |
-| `nl-en` | Néerlandais → Anglais | Helsinki-NLP/opus-mt-nl-en |
-| `pl-en` | Polonais → Anglais | Helsinki-NLP/opus-mt-pl-en |
-| `ROMANCE-en` | Français/Espagnol/Italien/Portugais → Anglais | Helsinki-NLP/opus-mt-ROMANCE-en |
+### Modèles disponibles
 
-### Pivots Sortants (Anglais → Cible)
+| Direction | Modèle | Langues couvertes |
+|-----------|--------|-------------------|
+| **→ anglais** | `opus-mt-ja-en` | Japonais |
+| | `opus-mt-zh-en` | Chinois |
+| | `opus-mt-ko-en` | Coréen |
+| | `opus-mt-ru-en` | Russe |
+| | `opus-mt-ar-en` | Arabe |
+| | `opus-mt-hi-en` | Hindi |
+| | `opus-mt-th-en` | Thaï |
+| | `opus-mt-vi-en` | Vietnamien |
+| | `opus-mt-de-en` | Allemand |
+| | `opus-mt-nl-en` | Néerlandais |
+| | `opus-mt-pl-en` | Polonais |
+| | `opus-mt-ROMANCE-en` | Français, Espagnol, Italien, Portugais |
+| **anglais →** | `opus-mt-en-ROMANCE` | Français (`>>fr<<`), Espagnol (`>>es<<`), Italien (`>>it<<`), Portugais (`>>pt<<`) |
+| | `opus-mt-en-de` | Allemand |
+| | `opus-mt-en-nl` | Néerlandais |
+| | `opus-mt-en-ru` | Russe |
+| | `opus-mt-en-hi` | Hindi |
+| | `opus-mt-en-zh` | Chinois (`>>cmn<<`) |
+| | `opus-mt-en-vi` | Vietnamien (`>>vie<<`) |
+| | `opus-mt-en-ar` | Arabe (`>>ara<<`) |
+| | `opus-mt-en-mul` | Japonais (`>>jpn<<`), Thaï (`>>tha<<`) |
+| | `opus-mt-en-sla` | Polonais (`>>pol<<`) |
+| | `opus-mt-tc-big-en-ko` | Coréen |
 
-| Modèle | Langues | Source HuggingFace |
-|--------|---------|-------------------|
-| `en-ROMANCE` | Anglais → Français/Espagnol/Italien/Portugais | Helsinki-NLP/opus-mt-en-ROMANCE |
-| `en-zh` | Anglais → Chinois | Helsinki-NLP/opus-mt-en-zh |
-| `en-de` | Anglais → Allemand | Helsinki-NLP/opus-mt-en-de |
-| `en-nl` | Anglais → Néerlandais | Helsinki-NLP/opus-mt-en-nl |
-| `en-ru` | Anglais → Russe | Helsinki-NLP/opus-mt-en-ru |
-| `en-hi` | Anglais → Hindi | Helsinki-NLP/opus-mt-en-hi |
-| `en-ar` | Anglais → Arabe | argostranslate/argos-opus-en-ar (TC-Big) |
-| `en-vi` | Anglais → Vietnamien | Helsinki-NLP/opus-mt-en-vi |
-| `en-mul` | Anglais → Japonais/Thaï | Helsinki-NLP/opus-mt-en-mul |
-| `tc-big-en-ko` | Anglais → Coréen | argostranslate/argos-opus-en-ko (TC-Big) |
-| `en-sla` | Anglais → Polonais | Helsinki-NLP/opus-mt-en-sla |
-
-### Routage Automatique
-
-Pour traduire de la langue A vers la langue B :
-
-1. **Traduction directe** si le modèle `A-B` existe
-2. **Pivot via l'anglais** si `A→en` et `en→B` existent : `A → en → B`
-3. **Échec** : retourne le texte original si aucune route disponible
-
-Exemple : `fr → de` = `fr→en` (ROMANCE-en) + `en→de` (en-de)
+Tous les modèles proviennent de [Helsinki-NLP](https://huggingface.co/Helsinki-NLP) et sont convertis au format CTranslate2 INT8 par `scripts/prepare_translation_models.sh`.
 
 ---
 
-## État d'implémentation
+## Langues supportées
 
-| Fonctionnalité | Statut | Notes |
-|---|---|---|
-| Sélection du PDF source | ✅ Implémenté | Via `file_picker` |
-| Choix du fichier de sortie | ✅ Implémenté | Dialog pré-rempli, bouton "Parcourir…" |
-| Rendu des pages en images | ✅ Implémenté | `pdftoppm` à 150 DPI (détection) / 600 DPI (OCR) |
-| OCR | ✅ Implémenté | PaddleOCR PP-OCRv4 via ONNX Runtime, subprocess Python |
-| Détection de langue | ✅ Implémenté | 3 passes PaddleOCR + FastText LID 176 langues |
-| **Traduction** | ✅ Implémenté | **Opus-MT (Helsinki-NLP), CTranslate2 + sentencepiece, 100 % hors-ligne** |
-| **Modèles de traduction** | ✅ **Graphe de pivots** | 22 modèles OPUS-MT, ~50 MB par paire |
-| Confirmation des langues | ✅ Implémenté | Écran de validation page par page avec miniature zoomable |
-| Génération PDF par page | ✅ Implémenté | `compute()` Flutter — isolate de fond |
-| Assemblage du document final | ✅ Implémenté | `pdfunite` (poppler-utils) |
-| Progression détaillée | ✅ Implémenté | Cercle global + barre d'étape |
-| Cache de traduction | ✅ Implémenté | Cache persistant par paire de langues |
-| Build Linux desktop | ✅ Fonctionnel | `flutter_app/build/linux/x64/release/bundle/` |
-| Packaging Snap | ✅ Fonctionnel | Python env, PaddleOCR, CTranslate2 et poppler-utils bundlés |
-
----
-
-## Architecture Globale
-
-```
-PDF source (sélectionné par l'utilisateur)
-   │
-   ├─ pdfinfo              → nombre de pages
-   │
-   └─ Phase 1 — Détection de langue (par page) :
-        ├─ pdftoppm 150DPI → image PNG (miniature)
-        └─ paddle_runner.py → 3 passes (ch → japan → en) + analyse Unicode
-           └─ fasttext_detect.py → classification FastText LID si script latin
-   │
-   └─ Écran de confirmation — résumé par page, personnalisation optionnelle
-   │
-   └─ Phase 2 — Traduction (par page) :
-        ├─ pdftoppm 600DPI → image PNG haute résolution
-        ├─ paddle_runner.py → blocs texte + bounding boxes
-        ├─ opusmt_translate.py → Opus-MT (CTranslate2 + sentencepiece)
-        │   └─ Graphe de pivots : routage automatique via anglais
-        └─ compute() → PDF de la page (isolate de fond)
-                                  │
-                                  └─ fichier PDF temporaire
-   │
-   └─ pdfunite             → assemblage en fichier de destination
-```
+| Code | Langue | Script OCR | Pivot entrant | Pivot sortant |
+|------|--------|-----------|---------------|---------------|
+| `en` | English | ch (PP-OCRv4) | — | — |
+| `fr` | Français | ch | ROMANCE-en | en-ROMANCE `>>fr<<` |
+| `es` | Español | ch | ROMANCE-en | en-ROMANCE `>>es<<` |
+| `de` | Deutsch | ch | de-en | en-de |
+| `it` | Italiano | ch | ROMANCE-en | en-ROMANCE `>>it<<` |
+| `pt` | Português | ch | ROMANCE-en | en-ROMANCE `>>pt<<` |
+| `nl` | Nederlands | ch | nl-en | en-nl |
+| `pl` | Polski | ch | pl-en | en-sla `>>pol<<` |
+| `ru` | Русский | cyrillic (PP-OCRv5) | ru-en | en-ru |
+| `ja` | 日本語 | japan (PP-OCRv1) | ja-en | en-mul `>>jpn<<` |
+| `zh` | 中文 | ch | zh-en | en-zh `>>cmn<<` |
+| `ko` | 한국어 | korean (PP-OCRv1) | ko-en | tc-big-en-ko |
+| `ar` | العربية | arabic (PP-OCRv5) | ar-en | en-ar `>>ara<<` |
+| `hi` | हिन्दी | devanagari (PP-OCRv5) | hi-en | en-hi |
+| `th` | ไทย | thai (PP-OCRv5) | th-en | en-mul `>>tha<<` |
+| `vi` | Tiếng Việt | ch | vi-en | en-vi `>>vie<<` |
 
 ---
 
-## Composants Techniques
+## OCR — Préprocessing adaptatif
 
-### Outils Système Requis
+RapidOCR normalise en interne avec `(px/255 − 0.5) / 0.5` sur image BGR 3 canaux. Le préprocessing externe est donc **adaptatif et non-destructif** :
 
-| Outil | Paquet apt | Usage |
-|---|---|---|
-| `pdfinfo` | `poppler-utils` | Comptage des pages |
-| `pdftoppm` | `poppler-utils` | Rendu page → PNG (150/600 DPI) |
-| `pdfunite` | `poppler-utils` | Assemblage PDF final |
-| `curl` | `curl` | Téléchargement des modèles OPUS-MT depuis HuggingFace |
+| Étape | Condition | Raison |
+|-------|-----------|--------|
+| CLAHE sur canal L (LAB) | std pixel < 45 | Améliore le contraste local sans toucher la couleur |
+| Unsharp masking | Variance Laplacien < 150 | Renforce les bords pour DBNet |
+| Aucun préprocessing | Image déjà nette | Évite d'introduire des artefacts inutiles |
 
-### Scripts Python Bundlés (`assets/scripts/`)
-
-| Script | Rôle |
-|--------|------|
-| `paddle_runner.py` | Extraction OCR et détection de script via RapidOCR (ONNX Runtime) |
-| `fasttext_detect.py` | Classification de langue via FastText LID (`lid.176.ftz`) |
-| `opusmt_translate.py` | Traduction par lot via Opus-MT / CTranslate2 |
-
-### Packages Flutter Actifs
-
-| Package | Version | Usage |
-|---|---|---|
-| `go_router` | `^17.0.0` | Navigation |
-| `file_picker` | `^11.0.0` | Sélection du PDF source et du fichier de sortie |
-| `pdf` | `^3.10.0` | Génération PDF par page avec overlay |
-| `image` | `^4.1.0` | Décodage PNG pour calcul dimensions |
-| `path_provider` | `^2.1.0` | Chemins système |
-| `path` | `^1.8.3` | Manipulation de chemins |
-| `logger` | `^2.0.0` | Logging |
-| `permission_handler` | `^12.0.0` | Permissions fichiers |
-
-### Packages Python (Bundlés dans le Snap)
-
-| Package | Version | Usage |
-|---|---|---|
-| `rapidocr-onnxruntime` | Latest | OCR PaddleOCR via ONNX Runtime (compatible AVX, sans AVX2) |
-| `onnxruntime` | Latest | Moteur ONNX — inférence rapide |
-| `opencv-python` | Latest | Traitement d'image pour RapidOCR |
-| `ctranslate2` | Latest | **Inférence Opus-MT rapide sur CPU** |
-| `sentencepiece` | Latest | **Tokenisation pour Opus-MT** |
-| `fasttext-wheel` | Latest | Classification de langue FastText LID (176 langues) |
+**Ne jamais appliquer** : binarisation Otsu, conversion en niveaux de gris, deskew Python (le deskew Dart 3 passes ±85° est déjà appliqué en amont).
 
 ---
 
-## Structure du Projet
+## Installation (utilisateur final)
 
-```
-pdf-ocr-translator/
-├── flutter_app/
-│   ├── lib/
-│   │   ├── main.dart                           # Bootstrap, GoRouter, pré-chargement
-│   │   ├── screens/
-│   │   │   ├── home_screen.dart                # Sélection PDF + langue cible + dialog sortie
-│   │   │   ├── processing_screen.dart          # Détection langue → confirmation → traduction
-│   │   │   └── result_screen.dart              # Affichage du fichier produit
-│   │   ├── services/
-│   │   │   ├── pdf_service.dart                # Pipeline complet (pdfinfo/pdftoppm/pdfunite/compute)
-│   │   │   ├── ocr_service.dart                # RapidOCR + FastText LID — détection et OCR
-│   │   │   └── translation_service.dart        # **Opus-MT + Graphe de pivots — traduction**
-│   │   ├── models/
-│   │   │   ├── language.dart                   # 16 langues supportées
-│   │   │   ├── language_detection.dart         # PageLanguage (code détecté, surcharge, miniature)
-│   │   │   ├── processing.dart                 # ProcessingUpdate (progression)
-│   │   │   └── app_logger.dart                 # Logger + répertoire debug
-│   │   └── theme/
-│   │       └── app_theme.dart
-│   ├── assets/
-│   │   ├── fonts/                              # Roboto Regular/Bold/Italic
-│   │   ├── models/
-│   │   │   ├── lid.176.ftz                    # FastText LID, ~900 KB
-│   │   │   └── onnx/                          # Modèles ONNX pour RapidOCR
-│   │   │       ├── ch_det.onnx
-│   │   │       ├── ch_rec.onnx
-│   │   │       ├── japan_rec.onnx
-│   │   │       ├── korean_rec.onnx
-│   │   │       ├── arabic_rec.onnx
-│   │   │       ├── cyrillic_rec.onnx
-│   │   │       ├── devanagari_rec.onnx
-│   │   │       └── thai_rec.onnx
-│   │   ├── translation_models/                # **Modèles OPUS-MT (graphe de pivots)**
-│   │   │   ├── ja-en/
-│   │   │   ├── zh-en/
-│   │   │   ├── ROMANCE-en/
-│   │   │   ├── en-ROMANCE/
-│   │   │   ├── tc-big-en-ar/
-│   │   │   └── ... (22 modèles au total)
-│   │   └── scripts/
-│   │       ├── paddle_runner.py
-│   │       ├── fasttext_detect.py
-│   │       └── opusmt_translate.py
-│   ├── linux/
-│   └── pubspec.yaml
-├── scripts/
-│   ├── download_fasttext_model.sh       # Télécharge lid.176.ftz
-│   ├── download_pip_wheels.sh           # Télécharge les wheels Python pour le snap
-│   └── prepare_translation_models.sh     # **Télécharge et convertit les modèles OPUS-MT**
-├── snapcraft.yaml                       # Snap (core24, confinement strict)
-├── build-snap.sh                        # Script de build complet
-├── install-local.sh                     # Installation locale du snap
-└── README.md
-```
-
----
-
-## Flux Utilisateur
-
-1. **HomeScreen** — sélection du PDF source, choix de la langue cible, chemin de sortie
-2. **Phase détection** — pour chaque page : miniature 150 DPI + détection automatique de langue
-3. **Écran de confirmation** — liste des pages avec langue détectée et miniature zoomable ; option "Personnaliser" pour surcharger par page ou pour l'ensemble du document
-4. **Phase traduction** — pour chaque page : OCR 600 DPI → Opus-MT (via graphe de pivots) → PDF de page (isolate)
-5. **Assemblage** — `pdfunite` fusionne tous les PDFs de pages → fichier de destination
-6. **ResultScreen** — chemin du fichier produit
-
----
-
-## Langues Supportées
-
-16 langues définies dans `language.dart` :
-
-| Code | Langue | Script | Modèle OCR | Pivot Entrant | Pivot Sortant |
-|------|--------|--------|-------------|---------------|---------------|
-| `en` | English | Latin | ch | — | — |
-| `fr` | Français | Latin | ch | ROMANCE-en | en-ROMANCE |
-| `es` | Español | Latin | ch | ROMANCE-en | en-ROMANCE |
-| `de` | Deutsch | Latin | ch | de-en | en-de |
-| `it` | Italiano | Latin | ch | ROMANCE-en | en-ROMANCE |
-| `pt` | Português | Latin | ch | ROMANCE-en | en-ROMANCE |
-| `nl` | Nederlands | Latin | ch | nl-en | en-nl |
-| `pl` | Polski | Latin | ch | pl-en | en-sla |
-| `ru` | Русский | Cyrillique | cyrillic | ru-en | en-ru |
-| `ja` | 日本語 | Japonais | japan | ja-en | en-mul |
-| `zh` | 中文 | CJK | ch | zh-en | en-zh |
-| `ko` | 한국어 | Hangul | korean | ko-en | tc-big-en-ko |
-| `ar` | العربية | Arabe | arabic | ar-en | tc-big-en-ar |
-| `hi` | हिन्दी | Devanagari | devanagari | hi-en | en-hi |
-| `th` | ไทย | Thaï | thai | th-en | en-mul |
-| `vi` | Tiếng Việt | Latin | ch | vi-en | en-vi |
-
-> **Note** : Les modèles de traduction sont basés sur OPUS-MT (Helsinki-NLP) avec certains modèles TC-Big (argostranslate) pour une meilleure performance.
-
----
-
-## Modèles de Traduction
-
-### Organisation
-
-Les modèles sont organisés en **graphe de pivots** :
-
-```
-Modèles Pivots Entrants (12) : Source → Anglais
-├── Modèles dédiés : ja-en, zh-en, ko-en, ru-en, ar-en, hi-en, th-en, vi-en, de-en, nl-en, pl-en
-└── Modèles groupés : ROMANCE-en (fr, es, it, pt)
-
-Modèles Pivots Sortants (12) : Anglais → Cible
-├── Modèles dédiés : en-de, en-nl, en-ru, en-hi, en-vi
-├── Modèles groupés : en-ROMANCE (fr, es, it, pt)
-├── Modèles multi-langues : en-mul (ja, th), en-sla (pl)
-└── Modèles TC-Big : tc-big-en-ar, tc-big-en-ko
-```
-
-### Stockage
-
-- **Format** : CTranslate2 (INT8 quantifié) pour performance optimale
-- **Taille** : ~50 MB par paire de langues
-- **Emplacement** : `flutter_app/assets/translation_models/`
-- **Bundling** : Inclus dans le snap (taille totale ~1.1 GB)
-
-### Préparation des Modèles
-
-Pour générer les modèles localement :
+Le snap est **autonome** : Python 3.12, RapidOCR, CTranslate2, sentencepiece, FastText et poppler-utils sont bundlés — aucune dépendance à installer.
 
 ```bash
-# Rendre exécutable
-chmod +x scripts/prepare_translation_models.sh
-
-# Télécharger et convertir tous les modèles
-./scripts/prepare_translation_models.sh
-
-# Options disponibles
-./scripts/prepare_translation_models.sh --list       # Liste les modèles sans télécharger
-./scripts/prepare_translation_models.sh --small      # Télécharge 4 modèles pour test
-./scripts/prepare_translation_models.sh --clean     # Nettoie avant téléchargement
-./scripts/prepare_translation_models.sh --verbose    # Mode verbeux
-```
-
-**Prérequis** :
-- `git` et `git-lfs` — pour télécharger depuis HuggingFace
-- `python3.12+` et `pip` — pour la conversion CTranslate2
-- `ctranslate2` — installé automatiquement si manquant
-
----
-
-## Installation (Utilisateur Final)
-
-Le snap est **autonome** : Python, PaddleOCR (ONNX Runtime), FastText, CTranslate2, sentencepiece et poppler-utils sont **bundlés**. Aucune dépendance à installer manuellement.
-
-```bash
-# Depuis le Snap Store (à venir)
+# Snap Store (à venir)
 sudo snap install pdf-ocr-translator
-snap run pdf-ocr-translator
 
-# Ou depuis un fichier local (développement)
+# Ou depuis un fichier local
 sudo snap install --dangerous pdf-ocr-translator_0.1.0_amd64.snap
+bash install-local.sh   # établit la connexion GTK3 (gnome-46-2404)
 ```
-
-La connexion au content snap GTK3 (`gnome-46-2404`) est établie automatiquement par le Snap Store.
 
 ---
 
-## Build Depuis les Sources
+## Build depuis les sources
 
-### Ce dont tu as besoin sur ta machine
-
-| Outil | Installation | Rôle |
-|---|---|---|
-| Flutter SDK | voir ci-dessous | Compiler l'application |
-| `build-essential`, `cmake`, `ninja-build`, `clang`, `pkg-config`, `libgtk-3-dev` | `apt install` | Toolchain de build Flutter Linux |
-| `libglycin-2-0` | `apt install` | Chargeur d'images GNOME 46 |
-| Snapcraft | `snap install snapcraft --classic` | Packager le snap |
-| `gnome-46-2404` | `snap install gnome-46-2404` | Content snap GTK3 (runtime + build) |
+### Prérequis
 
 ```bash
-# Toolchain Flutter Linux (Ubuntu/Debian)
-sudo apt update && sudo apt install \
-  build-essential cmake ninja-build clang pkg-config libgtk-3-dev \
-  libglycin-2-0
+# Toolchain Flutter Linux
+sudo apt install build-essential cmake ninja-build clang pkg-config libgtk-3-dev libglycin-2-0
 
 # Flutter SDK
 git clone https://github.com/flutter/flutter.git -b stable ~/flutter
 export PATH="$HOME/flutter/bin:$PATH"
-flutter doctor
 flutter config --enable-linux-desktop
 
 # Snapcraft
@@ -379,186 +167,127 @@ sudo snap install snapcraft --classic
 sudo snap install gnome-46-2404
 ```
 
-> **Pas besoin** d'installer Python, PaddleOCR, CTranslate2 ou poppler-utils : ils sont téléchargés et bundlés automatiquement dans le snap lors du build.
+Python, les wheels et poppler ne sont **pas** à installer sur la machine de build — ils sont téléchargés et bundlés automatiquement.
 
-### Premier Build (après clonage)
+### Préparer les modèles de traduction (une fois)
 
 ```bash
-# Installer les dépendances Flutter
+# Installe transformers + torch temporairement, convertit tous les modèles en CTranslate2 INT8
+chmod +x scripts/prepare_translation_models.sh
+./scripts/prepare_translation_models.sh
+
+# Options utiles
+./scripts/prepare_translation_models.sh --list    # liste sans télécharger
+./scripts/prepare_translation_models.sh --small   # 4 modèles seulement (test)
+./scripts/prepare_translation_models.sh --clean   # recommence de zéro
+```
+
+Les modèles (~50 MB chacun) sont écrits dans `flutter_app/assets/translation_models/` et bundlés dans le snap au prochain build.
+
+### Build
+
+```bash
 cd flutter_app && flutter pub get && cd ..
-
-# Lancer le build complet
-bash build-snap.sh
+bash build-snap.sh          # ~20-30 min au premier build (téléchargements inclus)
+bash build-snap.sh          # ~3-5 min ensuite (incrémental)
+bash build-snap.sh --clean  # rebuild complet (~15 min)
 ```
 
-`build-snap.sh` orchestre automatiquement :
-1. ✅ Téléchargement du modèle FastText LID (`lid.176.ftz`, ~900 KB) si absent
-2. ✅ Téléchargement des wheels Python si absentes (`rapidocr-onnxruntime`, `onnxruntime`, `opencv-python`, `ctranslate2`, `sentencepiece`, `fasttext-wheel` ~185 MB + dépendances)
-3. ✅ Build Flutter Linux release (ignoré si les sources `.dart` n'ont pas changé)
-4. ✅ Build snapcraft incrémental (seules les parties modifiées sont reconstruites)
+`build-snap.sh` orchestre dans l'ordre :
+1. Téléchargement du modèle FastText LID (`lid.176.ftz`, ~900 KB)
+2. Téléchargement des wheels Python (~185 MB)
+3. Vérification de la présence des modèles de traduction
+4. `flutter build linux --release`
+5. `snapcraft`
 
-> **Note** : Les modèles de traduction OPUS-MT sont téléchargés **au premier usage** par l'application. Pour les bundler dans le snap, exécutez d'abord `scripts/prepare_translation_models.sh`.
-
-Le premier build prend **20–30 min** (téléchargements + compilation). Les suivants sont bien plus rapides.
-
-### Builds Suivants
+### Mode développement Flutter (sans snap)
 
 ```bash
-bash build-snap.sh          # build incrémental — ~3–5 min
-bash build-snap.sh --clean  # rebuild complet depuis zéro — ~15 min
-```
-
-`--clean` est nécessaire uniquement après avoir modifié des `stage-packages` dans `snapcraft.yaml`. Si le fichier a changé sans `--clean`, le script affiche un avertissement.
-
-### Installation et Test du Snap Produit (Développement)
-
-```bash
-bash install-local.sh
-snap run pdf-ocr-translator
-```
-
-`install-local.sh` installe le snap et établit manuellement la connexion au content snap GTK3 (`gnome-46-2404`). Cette étape est nécessaire en local car l'installation avec `--dangerous` (fichier local) bypass le Snap Store, qui établit normalement cette connexion automatiquement. En production (Snap Store), aucune commande supplémentaire n'est requise.
-
-### Mode Développement Flutter (sans snap)
-
-Pour itérer rapidement sur l'interface sans passer par snapcraft :
-
-```bash
-# Prérequis supplémentaires (non nécessaires pour le build snap)
-sudo apt install poppler-utils python3-pip
+sudo apt install poppler-utils
 pip3 install rapidocr-onnxruntime onnxruntime opencv-python ctranslate2 sentencepiece fasttext-wheel
-
-cd flutter_app
-flutter run -d linux
+cd flutter_app && flutter run -d linux
 ```
 
 ---
 
-## Dépendances Clés
+## Structure du projet
 
-### Outils Système (Bundlés dans le Snap)
-
-| Outil | Paquet apt | Usage |
-|---|---|---|
-| `pdfinfo` | `poppler-utils` | Comptage des pages |
-| `pdftoppm` | `poppler-utils` | Rendu page → PNG |
-| `pdfunite` | `poppler-utils` | Assemblage PDF final |
-| `curl` | `curl` | Téléchargement des modèles |
-
-### Packages Python (Bundlés)
-
-| Package | Usage |
-|---|---|
-| `rapidocr-onnxruntime` | OCR PaddleOCR via ONNX Runtime |
-| `onnxruntime` | Moteur ONNX — inférence rapide |
-| `opencv-python` | Traitement d'image pour RapidOCR |
-| `ctranslate2` | **Inférence Opus-MT rapide sur CPU** |
-| `sentencepiece` | **Tokenisation pour Opus-MT** |
-| `fasttext-wheel` | Classification de langue FastText LID |
-
----
-
-## Configuration du Graphe de Pivots
-
-Le graphe de pivots est défini dans `translation_service.dart` :
-
-```dart
-static const _modelGraph = <String, (String, String?)>{
-  // Pivots Entrants
-  'fr-en': ('ROMANCE-en', null),
-  'ja-en': ('ja-en', null),
-  // ...
-  
-  // Pivots Sortants
-  'en-fr': ('en-ROMANCE', '>>fr<<'),
-  'en-ja': ('en-mul', '>>jpn<<'),
-  // ...
-}
+```
+pdf-ocr-translator/
+├── flutter_app/
+│   ├── lib/
+│   │   ├── main.dart                     # Bootstrap, GoRouter
+│   │   ├── screens/
+│   │   │   ├── home_screen.dart          # Sélection PDF, langue cible, chemin sortie
+│   │   │   ├── processing_screen.dart    # Détection → confirmation → traduction
+│   │   │   └── result_screen.dart        # Fichier produit
+│   │   ├── services/
+│   │   │   ├── pdf_service.dart          # Orchestration pdfinfo/pdftoppm/pdfunite
+│   │   │   ├── ocr_service.dart          # RapidOCR + FastText + deskew
+│   │   │   └── translation_service.dart  # Graphe de pivots Opus-MT
+│   │   └── models/
+│   │       ├── language.dart             # 16 langues supportées
+│   │       ├── language_detection.dart   # PageLanguage (code, surcharge, miniature)
+│   │       └── processing.dart           # ProcessingUpdate (progression)
+│   └── assets/
+│       ├── models/
+│       │   ├── lid.176.ftz               # FastText LID (~900 KB)
+│       │   └── onnx/                     # Modèles RapidOCR PP-OCR (ONNX)
+│       │       ├── japan_rec.onnx        # PP-OCRv1, ja
+│       │       ├── korean_rec.onnx       # PP-OCRv1, ko
+│       │       ├── arabic_rec.onnx       # PP-OCRv5 mobile, ar
+│       │       ├── cyrillic_rec.onnx     # PP-OCRv5 mobile, ru
+│       │       ├── devanagari_rec.onnx   # PP-OCRv5 mobile, hi
+│       │       └── thai_rec.onnx         # PP-OCRv5 mobile, th
+│       ├── translation_models/           # Opus-MT CTranslate2 INT8 (généré par script)
+│       │   ├── ja-en/                    # model.bin + source.spm + target.spm
+│       │   ├── en-ROMANCE/
+│       │   └── ...                       # 23 répertoires au total
+│       └── scripts/
+│           ├── paddle_runner.py          # OCR et détection de script
+│           ├── fasttext_detect.py        # Classification de langue FastText
+│           └── opusmt_translate.py       # Traduction par lot CTranslate2
+├── scripts/
+│   ├── download_fasttext_model.sh        # Télécharge lid.176.ftz
+│   ├── download_pip_wheels.sh            # Télécharge les wheels Python
+│   └── prepare_translation_models.sh    # Convertit les modèles Opus-MT → CTranslate2
+├── snapcraft.yaml                        # Snap (core24, confinement strict)
+├── build-snap.sh                         # Orchestration du build complet
+└── install-local.sh                      # Installation + connexion GTK3
 ```
 
-Pour ajouter une nouvelle langue :
-1. Ajouter le code langue dans `language.dart`
-2. Définir les paires dans `_modelGraph`
-3. Ajouter le modèle dans `scripts/prepare_translation_models.sh`
-4. Mettre à jour `pubspec.yaml` avec le répertoire du modèle
+---
+
+## Stack technique
+
+| Couche | Technologie | Rôle |
+|--------|-------------|------|
+| UI | Flutter 3.16+, GoRouter | Interface Linux desktop |
+| PDF | poppler-utils (`pdftoppm`, `pdfunite`) | Rendu et assemblage |
+| OCR | RapidOCR 1.4.4 + ONNX Runtime 1.26 | PP-OCRv4/v5 via ONNX, compatible AVX (sans AVX2) |
+| Détection langue | PP-OCRv4 (3 passes) + FastText LID 176 | Script Unicode → BCP-47 |
+| Traduction | Opus-MT (Helsinki-NLP) + CTranslate2 + sentencepiece | 23 modèles INT8, graphe étoile via EN |
+| Packaging | Snap (core24, confinement strict) | Autonome, sans dépendances système |
+
+> **Pourquoi ONNX Runtime ?** PaddlePaddle 3.3.1 utilise des instructions AVX2 absentes sur les CPUs Ivy Bridge (2012). ONNX Runtime dispatche les instructions au runtime — AVX suffit.
 
 ---
 
-## Bonnes Pratiques
+## Limites connues
 
-### Gestion des Modèles
-
-- **Ne pas commiter** les fichiers de modèles dans git (voir `.gitignore`)
-- Utiliser `scripts/prepare_translation_models.sh` pour générer les modèles
-- Les modèles sont téléchargés **au premier usage** si absents
-- Pour le snap : bundler les modèles avec `prepare_translation_models.sh` avant le build
-
-### Cache de Traduction
-
-- Le cache est persistant dans `~/.config/pdf_ocr_translator/translation_cache.json`
-- Utiliser `TranslationService().clearCache()` pour vider le cache
-- Le cache utilise la clé `src→tgt:textHash` pour éviter les re-traductions
-
-### Debug
-
-- Activez le **mode debug** dans l'écran de confirmation pour :
-  - Exporter les images intermédiaires dans `output/`
-  - Générer des logs détaillés
-  - Conserver les fichiers temporaires
-
----
-
-## Limites Connues
-
-| Limite | Statut | Solution |
-|--------|--------|----------|
-| Taille du snap avec tous les modèles | ~1.1 GB | Bundler seulement les modèles nécessaires |
-| Téléchargement initial des modèles | Lent | Utiliser `prepare_translation_models.sh` avant le build |
-| Traduction des langues rares | Non supporté | Ajouter les modèles OPUS-MT correspondants |
-| OCR des textes manuscrits | Non supporté | PaddleOCR est optimisé pour texte imprimé |
-
----
-
-## Roadmap
-
-| Fonctionnalité | Priorité | Statut |
-|---|---|---|
-| Packaging Flatpak | Moyenne | ⏳ À faire |
-| Support Windows | Moyenne | ⏳ À faire |
-| Support macOS | Moyenne | ⏳ À faire |
-| Traduction par lots (multiple PDFs) | Basse | ⏳ À faire |
-| Sélection des pages à traiter | Moyenne | ⏳ À faire |
-| Export en TXT/MD | Moyenne | ⏳ À faire |
+- **OCR manuscrit** : PP-OCRv4 est optimisé pour le texte imprimé
+- **PDF vectoriel** : l'OCR n'est pas utile si le PDF contient déjà du texte sélectionnable
+- **Mise en page complexe** : les bounding boxes texte sont superposées mais la police de substitution ne correspond pas toujours à l'original
+- **Modèles de traduction** : doivent être générés avant le build snap (`prepare_translation_models.sh`) ; l'application ne les télécharge pas à l'exécution
 
 ---
 
 ## Licence
 
-Apache License 2.0
+Apache License 2.0 — voir [LICENSE](LICENSE)
 
-## Contribuer
+## Crédits
 
-1. Fork du dépôt
-2. Créer une branche : `git checkout -b feature/ma-fonctionnalite`
-3. Commit : `git commit -m 'feat: description'`
-4. Push : `git push origin feature/ma-fonctionnalite`
-5. Créer une Pull Request
+[RapidOCR](https://github.com/RapidAI/RapidOCR) · [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [ONNX Runtime](https://onnxruntime.ai) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [Opus-MT / Helsinki-NLP](https://huggingface.co/Helsinki-NLP) · [FastText](https://fasttext.cc) · [Flutter](https://flutter.dev)
 
----
-
-## Remerciements
-
-- **PaddleOCR** : https://github.com/PaddlePaddle/PaddleOCR
-- **ONNX Runtime** : https://onnxruntime.ai/
-- **CTranslate2** : https://github.com/OpenNMT/CTranslate2
-- **Opus-MT** : https://huggingface.co/Helsinki-NLP
-- **FastText LID** : https://fasttext.cc/
-- **RapidOCR** : https://github.com/RapidAI/RapidOCR
-- **Flutter** : https://flutter.dev/
-
----
-
-## Support
-
-Pour les questions ou problèmes, ouvrez une issue sur GitHub ou contactez :
-timothee.troncy@gmail.com
+Issues et contributions : [github.com/AgentLeChat/pdf-ocr-translator](https://github.com/AgentLeChat/pdf-ocr-translator)
