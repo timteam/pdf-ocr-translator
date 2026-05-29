@@ -52,7 +52,7 @@ MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
 
 if [[ $MODELS_COUNT -eq 0 ]]; then
   echo -e "${YELLOW}📥 Aucun modèle de traduction trouvé — génération en cours...${NC}"
-  echo -e "${YELLOW}   (~1 h au premier run, connexion internet requise)${NC}"
+  echo -e "${YELLOW}   (~1-3 h au premier build selon la connexion, 24 modèles × ~200 MB)${NC}"
   if ./scripts/prepare_translation_models.sh "$FLUTTER_MODELS_DIR"; then
     MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
     echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) généré(s)${NC}"

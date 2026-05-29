@@ -18,9 +18,10 @@
 # DEST_DIR : flutter_app/assets/translation_models/ par défaut
 #
 # Prérequis :
-#   python3 + python3-venv (sudo apt install python3-venv)
-#   ~2 GB d'espace libre (venv temporaire + modèles)
-#   ~1 h (premier run, dépend de la connexion)
+#   python3, curl
+#   ~2 GB d'espace libre (packages temporaires + modèles convertis)
+#   ~1-3 h au premier build selon la connexion (24 modèles × ~200 MB)
+#   Les builds suivants sont instantanés (modèles déjà présents).
 
 set -euo pipefail
 
@@ -112,47 +113,51 @@ display_model_list() {
 }
 
 # ─── Venv de conversion ───────────────────────────────────────────────────────
-VENV_DIR=""
+# Répertoire de packages temporaires (--target, pas de venv requis)
+PKGS_DIR=""
+PIP_PYZ=""
 
-setup_venv() {
-  VENV_DIR=$(mktemp -d /tmp/ct2conv_XXXXXXXX)
+setup_packages() {
+  PKGS_DIR=$(mktemp -d /tmp/ct2pkgs_XXXXXXXX)
+  PIP_PYZ=$(mktemp /tmp/pip_XXXXXXXX.pyz)
 
-  echo "→ Venv temporaire : $VENV_DIR"
-  echo "  Installation : ctranslate2, transformers, torch (CPU), sentencepiece, sacremoses"
-  echo "  (Premier run : ~5-10 min selon la connexion)"
+  echo "→ Téléchargement de pip bootstrap..."
+  curl -fsSL "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ"
+
+  echo "→ Installation des dépendances de conversion dans $PKGS_DIR"
+  echo "  ctranslate2, transformers, torch (CPU), sentencepiece, sacremoses"
+  echo "  (~5-10 min selon la connexion, une seule fois par build)"
   echo ""
 
-  if ! python3 -m venv "$VENV_DIR" 2>/dev/null; then
-    echo "❌ python3 -m venv a échoué."
-    echo "   Installe python3-venv : sudo apt install python3-venv"
-    echo "   puis relance ce script."
-    exit 1
-  fi
-
-  "$VENV_DIR/bin/pip" install --upgrade pip --quiet
-
-  # torch CPU uniquement (~500 MB vs 2 GB pour CUDA)
-  "$VENV_DIR/bin/pip" install \
+  # Packages sans torch d'abord
+  python3 "$PIP_PYZ" install \
     ctranslate2 \
     "transformers>=4.30" \
     sentencepiece \
     sacremoses \
+    --target "$PKGS_DIR" \
+    --no-cache-dir \
     --quiet
 
-  "$VENV_DIR/bin/pip" install \
-    torch --index-url https://download.pytorch.org/whl/cpu \
+  # torch CPU (index dédié pour éviter le wheel CUDA de 2 GB)
+  python3 "$PIP_PYZ" install \
+    torch \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --target "$PKGS_DIR" \
+    --no-cache-dir \
     --quiet
 
-  echo "→ Venv prêt : $("$VENV_DIR/bin/pip" show ctranslate2 | grep ^Version)"
+  local ct2_ver
+  ct2_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2; print(ctranslate2.__version__)" 2>/dev/null || echo "?")
+  echo "→ ctranslate2 $ct2_ver prêt"
   echo ""
 }
 
-cleanup_venv() {
-  if [[ -n "$VENV_DIR" && -d "$VENV_DIR" ]]; then
-    rm -rf "$VENV_DIR"
-  fi
+cleanup_packages() {
+  [[ -n "$PKGS_DIR" && -d "$PKGS_DIR" ]] && rm -rf "$PKGS_DIR"
+  [[ -n "$PIP_PYZ"  && -f "$PIP_PYZ"  ]] && rm -f  "$PIP_PYZ"
 }
-trap cleanup_venv EXIT
+trap cleanup_packages EXIT
 
 # ─── Conversion d'un modèle ───────────────────────────────────────────────────
 convert_model() {
@@ -201,9 +206,9 @@ print(f"  ✓ {out_dir} ({size:.0f} MB)")
 PYEOF
 
   if [[ "$VERBOSE" == true ]]; then
-    "$VENV_DIR/bin/python3" "$py_script" "$hf_id" "$dest"
+    PYTHONPATH="$PKGS_DIR" python3 "$py_script" "$hf_id" "$dest"
   else
-    "$VENV_DIR/bin/python3" "$py_script" "$hf_id" "$dest" 2>/dev/null
+    PYTHONPATH="$PKGS_DIR" python3 "$py_script" "$hf_id" "$dest" 2>/dev/null
   fi
 
   rm -f "$py_script"
@@ -246,8 +251,8 @@ echo ""
 
 mkdir -p "$DEST_DIR"
 
-# ─── Venv ─────────────────────────────────────────────────────────────────────
-setup_venv
+# ─── Packages de conversion ───────────────────────────────────────────────────
+setup_packages
 
 # ─── Boucle de conversion ────────────────────────────────────────────────────
 TOTAL=${#MODELS_TO_DO[@]}
