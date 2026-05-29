@@ -44,6 +44,7 @@ flutter:
     - assets/icons/
     - assets/fonts/
     - assets/models/
+    - assets/models/onnx/
     - assets/scripts/
 
   fonts:

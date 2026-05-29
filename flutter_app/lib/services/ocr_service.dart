@@ -30,9 +30,8 @@ Map<String, String> _buildPythonEnv() {
   // RUNPATH — elles nécessitent que leurs répertoires *.libs soient dans
   // LD_LIBRARY_PATH pour que le dynamic linker les trouve au runtime.
   final wheelLibDirs = [
-    p.join(localPyenv, 'paddle', 'libs'),
     p.join(localPyenv, 'numpy.libs'),
-    p.join(localPyenv, 'opencv_contrib_python.libs'),
+    p.join(localPyenv, 'opencv_python.libs'),
     p.join(localPyenv, 'ctranslate2.libs'),
     p.join(localPyenv, 'pillow.libs'),
     p.join(localPyenv, 'shapely.libs'),

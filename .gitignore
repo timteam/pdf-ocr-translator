@@ -99,6 +99,10 @@ npm-debug.log*
 output/
 translations_cache/
 models/
+# Exception : modèles ONNX statiques bundlés dans le snap
+!flutter_app/assets/models/
+!flutter_app/assets/models/onnx/
+!flutter_app/assets/models/onnx/*.onnx
 *.deb
 *.rpm
 .snapcraft_yaml_hash

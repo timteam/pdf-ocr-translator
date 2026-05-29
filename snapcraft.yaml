@@ -4,12 +4,12 @@ title: PDF OCR Translator
 summary: Fully offline PDF OCR and translation app
 description: |
   PDF OCR Translator extracts text from image-based PDF files using
-  PaddleOCR and translates it offline using Opus-MT neural models.
+  PaddleOCR models via ONNX Runtime (compatible with all x86_64 CPUs)
+  and translates it offline using Opus-MT neural models.
   Language detection uses FastText LID (176 languages).
   All processing happens locally on your device — no backend, no cloud.
 
-  On first use, PaddleOCR recognition models (~200 MB) and translation
-  models (~50 MB per language pair) are downloaded automatically.
+  Translation models (~50 MB per language pair) are downloaded on first use.
 
 license: Apache-2.0
 website: https://github.com/timteam/pdf-ocr-translator
@@ -52,7 +52,7 @@ apps:
       # GTK3 / GDK-Pixbuf / libepoxy viennent du content snap monté à runtime
       SNAP_DESKTOP_RUNTIME: $SNAP/gnome-platform
       # Libs vendorées par les wheels Python (sans RUNPATH — nécessitent LD_LIBRARY_PATH)
-      LD_LIBRARY_PATH: $SNAP/pyenv/paddle/libs:$SNAP/pyenv/numpy.libs:$SNAP/pyenv/opencv_contrib_python.libs:$SNAP/pyenv/ctranslate2.libs:$SNAP/pyenv/pillow.libs:$SNAP/pyenv/shapely.libs:$SNAP/gnome-platform/lib/x86_64-linux-gnu:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      LD_LIBRARY_PATH: $SNAP/pyenv/numpy.libs:$SNAP/pyenv/opencv_python.libs:$SNAP/pyenv/ctranslate2.libs:$SNAP/pyenv/pillow.libs:$SNAP/pyenv/shapely.libs:$SNAP/gnome-platform/lib/x86_64-linux-gnu:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
       XDG_DATA_DIRS: $SNAP/gnome-platform/usr/share:$SNAP/usr/share:$XDG_DATA_DIRS
       GDK_PIXBUF_MODULE_FILE: $SNAP/gnome-platform/usr/lib/x86_64-linux-gnu/gdk-pixbuf-current/loaders.cache
       # EGL : libEGL.so.1 (GLVND) trouve libEGL_mesa.so.0 via les ICD stagés
@@ -164,19 +164,21 @@ parts:
       - libgomp1             # runtime OpenMP requis par les extensions C de PaddleOCR
     override-build: |
       set -e
-      # paddlepaddle  : framework deep learning (moteur PaddleOCR)
-      # paddleocr     : OCR — détection + reconnaissance de texte
-      # ctranslate2   : runtime Opus-MT (inférence traduction offline)
-      # sentencepiece : tokenizer pré/post-traitement Opus-MT
-      # fasttext-wheel: détection de langue FastText LID (176 langues)
+      # rapidocr-onnxruntime : OCR via ONNX Runtime (compatible AVX, sans AVX2)
+      # onnxruntime           : moteur d'inférence ONNX (dispatch ISA dynamique)
+      # opencv-python         : traitement d'image pour rapidocr
+      # ctranslate2           : runtime Opus-MT (inférence traduction offline)
+      # sentencepiece         : tokenizer pré/post-traitement Opus-MT
+      # fasttext-wheel        : détection de langue FastText LID (176 langues)
       pip3 install \
         --no-cache-dir \
         --break-system-packages \
         --no-index \
         --find-links "$SNAPCRAFT_PART_SRC" \
         --target "$SNAPCRAFT_PART_INSTALL/pyenv" \
-        paddlepaddle \
-        paddleocr \
+        rapidocr-onnxruntime \
+        onnxruntime \
+        opencv-python \
         ctranslate2 \
         sentencepiece \
         fasttext-wheel
@@ -231,8 +233,8 @@ parts:
       check "usr/lib/x86_64-linux-gnu/libGL.so.1*"                           "libGL.so.1 (OpenGL GTK3)"
       check "usr/share/glvnd/egl_vendor.d/50_mesa.json"                      "EGL ICD (50_mesa.json)"
       check "usr/lib/x86_64-linux-gnu/libgomp.so*"                           "libgomp (OpenMP)"
-      check "pyenv/paddleocr*"                                                "paddleocr (Python)"
-      check "pyenv/paddlepaddle*"                                             "paddlepaddle (Python)"
+      check "pyenv/rapidocr_onnxruntime*"                                     "rapidocr-onnxruntime (Python)"
+      check "pyenv/onnxruntime*"                                              "onnxruntime (Python)"
       check "pyenv/ctranslate2*"                                              "ctranslate2 (Python)"
       check "pyenv/sentencepiece*"                                            "sentencepiece (Python)"
       check "pyenv/fasttext*"                                                 "fasttext (Python)"
