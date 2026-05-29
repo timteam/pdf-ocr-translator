@@ -51,13 +51,16 @@ FLUTTER_MODELS_DIR="flutter_app/assets/translation_models"
 MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
 
 if [[ $MODELS_COUNT -eq 0 ]]; then
-  echo -e "${YELLOW}⚠️  Aucun modèle de traduction trouvé dans $FLUTTER_MODELS_DIR/${NC}"
-  echo -e "   La traduction sera désactivée dans ce build (OCR et détection de langue OK)."
-  echo -e "   Pour activer la traduction, exécute d'abord :"
-  echo -e "   ${BLUE}./scripts/prepare_translation_models.sh${NC}"
-  echo -e "   puis relance build-snap.sh."
+  echo -e "${YELLOW}📥 Aucun modèle de traduction trouvé — génération en cours...${NC}"
+  echo -e "${YELLOW}   (~1 h au premier run, connexion internet requise)${NC}"
+  if ./scripts/prepare_translation_models.sh "$FLUTTER_MODELS_DIR"; then
+    MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
+    echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) généré(s)${NC}"
+  else
+    echo -e "${YELLOW}⚠️  Génération échouée — build sans traduction (OCR OK)${NC}"
+  fi
 else
-  echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) CTranslate2 trouvé(s) dans $FLUTTER_MODELS_DIR/${NC}"
+  echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) CTranslate2 trouvé(s)${NC}"
 fi
 
 # ── Flutter build (conditionnel) ─────────────────────────────────────────────
