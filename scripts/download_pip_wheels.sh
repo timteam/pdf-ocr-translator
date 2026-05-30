@@ -22,9 +22,10 @@ trap 'rm -f "$PIP_PYZ"' EXIT
 
 if command -v curl &>/dev/null; then
   echo "→ Téléchargement de pip bootstrap (pip.pyz)..."
-  curl -fsSL "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ" 2>/dev/null
+  curl -fL --progress-bar "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ"
 elif command -v wget &>/dev/null; then
-  wget -q "https://bootstrap.pypa.io/pip/pip.pyz" -O "$PIP_PYZ" 2>/dev/null
+  echo "→ Téléchargement de pip bootstrap (pip.pyz)..."
+  wget --show-progress -q "https://bootstrap.pypa.io/pip/pip.pyz" -O "$PIP_PYZ"
 else
   echo "❌ curl ou wget requis pour télécharger pip bootstrap."
   exit 1

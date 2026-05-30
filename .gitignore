@@ -118,3 +118,6 @@ snap/translation_models/
 *.deb
 *.rpm
 .snapcraft_yaml_hash
+
+# Token HuggingFace (cache local build-snap.sh, chmod 600)
+.hf_token

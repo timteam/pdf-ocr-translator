@@ -172,17 +172,37 @@ Python, les wheels et poppler ne sont **pas** à installer sur la machine de bui
 ### Préparer les modèles de traduction (une fois)
 
 ```bash
-# Installe transformers + torch temporairement, convertit tous les modèles en CTranslate2 INT8
+# Télécharge les 24 modèles Helsinki-NLP et les convertit en CTranslate2 INT8
 chmod +x scripts/prepare_translation_models.sh
 ./scripts/prepare_translation_models.sh
 
 # Options utiles
-./scripts/prepare_translation_models.sh --list    # liste sans télécharger
-./scripts/prepare_translation_models.sh --small   # 4 modèles seulement (test)
-./scripts/prepare_translation_models.sh --clean   # recommence de zéro
+./scripts/prepare_translation_models.sh --list              # liste sans télécharger
+./scripts/prepare_translation_models.sh --small             # 4 modèles (test rapide)
+./scripts/prepare_translation_models.sh --clean             # recommence de zéro
+./scripts/prepare_translation_models.sh --hf-token hf_xxxx # avec token HuggingFace
 ```
 
 Les modèles (~50 MB chacun) sont écrits dans `flutter_app/assets/translation_models/` et bundlés dans le snap au prochain build.
+
+#### Token HuggingFace (recommandé)
+
+Les modèles sont publics, mais un token évite le rate-limiting lors des 24 téléchargements. Crée un token **Read** sur [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+
+**`build-snap.sh` gère le token interactivement** au premier build et le met en cache dans `.hf_token` (gitignore, `chmod 600`) pour les builds suivants :
+
+```
+🔑 Token HuggingFace en cache : hf_pvjP****
+   [Entrée] Réutiliser   [n] Nouveau   [s] Supprimer   [i] Ignorer
+   >
+```
+
+Pour les builds non interactifs (CI/CD) :
+
+| Méthode | |
+|---------|--|
+| Variable d'environnement | `HF_TOKEN=hf_xxxx bash build-snap.sh` |
+| Argument direct au script | `./scripts/prepare_translation_models.sh --hf-token hf_xxxx` |
 
 ### Build
 

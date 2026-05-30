@@ -9,7 +9,7 @@ description: |
   Language detection uses FastText LID (176 languages).
   All processing happens locally on your device — no backend, no cloud.
 
-  Translation models (~50 MB per language pair) are downloaded on first use.
+  Translation models (Opus-MT CTranslate2 INT8, ~50 MB per pair) are bundled in the snap.
 
 license: Apache-2.0
 website: https://github.com/timteam/pdf-ocr-translator
@@ -38,7 +38,6 @@ apps:
     command: bin/launcher
     plugs:
       - home             # lecture/écriture des PDF dans ~/
-      - network          # téléchargement des modèles Opus-MT au premier lancement
       - desktop          # intégration bureau (fenêtre, icône)
       - desktop-legacy   # compatibilité GTK3 a11y / ibus
       - gsettings        # thème, polices et préférences GNOME
@@ -82,18 +81,6 @@ parts:
     plugin: nil
     override-prime: |
       mkdir -p "$SNAPCRAFT_PRIME/gnome-platform"
-
-  # Modèles de traduction OPUS-MT (prégénérés, ~1.1GB total)
-  # Ces modèles sont générés par scripts/prepare_translation_models.sh
-  # et doivent être présents dans snap/translation_models/ avant le build.
-  translation-models:
-    plugin: dump
-    source: ./snap/translation_models
-    source-type: local
-    organize:
-      '*': data/flutter_assets/assets/translation_models
-    stage:
-      - '*'
 
   # EGL : libepoxy (fourni par le content snap) dlopen-charge libEGL.so.1 au
   # runtime. libEGL.so.1 (GLVND) doit trouver un provider via les ICD dans
@@ -154,13 +141,11 @@ parts:
       - libxau6        # authentification X (MIT-MAGIC-COOKIE)
       - libxdmcp6      # XDMCP : protocole Display Manager Control
 
-  # Outils PDF : pdftoppm (rendu page), pdfinfo (comptage), pdftotext
-  # curl : téléchargement des modèles Opus-MT depuis HuggingFace au runtime
+  # Outils PDF : pdftoppm (rendu page), pdfinfo (comptage), pdftotext, pdfunite
   poppler:
     plugin: nil
     stage-packages:
       - poppler-utils  # pdftoppm (rendu), pdfinfo (comptage), pdftotext, pdfunite
-      - curl           # téléchargement des modèles Opus-MT depuis HuggingFace
 
   # Python + libs de calcul pour PaddleOCR/FastText/CTranslate2
   python-env:
@@ -232,7 +217,6 @@ parts:
       check "usr/bin/pdfinfo"                                                 "pdfinfo (poppler)"
       check "usr/bin/pdftotext"                                               "pdftotext (texte embarqué)"
       check "usr/bin/pdfunite"                                                "pdfunite (assemblage PDF)"
-      check "usr/bin/curl"                                                    "curl"
       check "usr/lib/x86_64-linux-gnu/libXfixes.so.3*"                        "libXfixes.so.3 (X11)"
       check "usr/lib/x86_64-linux-gnu/libX11.so.6*"                          "libX11.so.6 (X11)"
       check "usr/lib/x86_64-linux-gnu/libwayland-client.so.0*"               "libwayland-client.so.0 (Wayland)"
