@@ -50,97 +50,202 @@ echo -e "${YELLOW}🔍 Vérification des modèles de traduction...${NC}"
 FLUTTER_MODELS_DIR="flutter_app/assets/translation_models"
 MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
 
-if [[ $MODELS_COUNT -eq 0 ]]; then
+if [[ $MODELS_COUNT -gt 0 ]]; then
+  echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) CTranslate2 présents${NC}"
+else
   echo -e "${YELLOW}📥 Aucun modèle de traduction trouvé.${NC}"
-  echo -e "${YELLOW}   (~1-3 h au premier build selon la connexion, 24 modèles × ~200 MB)${NC}"
   echo ""
 
-  # ── Token HuggingFace ────────────────────────────────────────────────────────
-  # Cache local dans .hf_token (gitignore, chmod 600).
-  # Priorité : cache > $HF_TOKEN > prompt interactif.
-  HF_TOKEN_CACHE=".hf_token"
-  HF_TOKEN_FOR_BUILD=""
-  _hf_mask() { local t="$1"; echo "${t:0:8}****"; }
+  # ── Sélection des modèles à télécharger ────────────────────────────────────
+  # "all" = 24 modèles | "small" = 4 modèles | "KEY1,KEY2,..." = sélection
+  _MODELS_SELECTION="all"
+  _SKIP_MODELS=false
 
   if [[ -t 0 ]]; then
-    # ── Mode interactif ──────────────────────────────────────────────────────
-    if [[ -f "$HF_TOKEN_CACHE" ]]; then
-      _CACHED="$(< "$HF_TOKEN_CACHE")"
-      echo -e "${BLUE}🔑 Token HuggingFace en cache : $(_hf_mask "$_CACHED")${NC}"
-      echo -e "   ${BLUE}[Entrée]${NC} Réutiliser   ${BLUE}[n]${NC} Nouveau   ${BLUE}[s]${NC} Supprimer   ${BLUE}[i]${NC} Ignorer"
-      read -r -p "   > " _HF_CHOICE
-      case "${_HF_CHOICE,,}" in
-        n*)
-          read -r -p "   Nouveau token hf_... : " _NEW_TOKEN
-          if [[ -n "$_NEW_TOKEN" ]]; then
-            printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-            HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
-            echo -e "${GREEN}   ✓ Token mis à jour${NC}"
-          else
-            HF_TOKEN_FOR_BUILD="$_CACHED"
-            echo -e "${BLUE}   Token inchangé${NC}"
-          fi ;;
-        s*)
-          rm -f "$HF_TOKEN_CACHE"
-          echo -e "${YELLOW}   Token supprimé du cache${NC}"
-          read -r -p "   Nouveau token (ou Entrée pour ignorer) : " _NEW_TOKEN
-          if [[ -n "$_NEW_TOKEN" ]]; then
-            printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-            HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
-            echo -e "${GREEN}   ✓ Nouveau token sauvegardé${NC}"
-          fi ;;
-        i*)
-          echo -e "${YELLOW}   Token ignoré${NC}" ;;
-        *)  # Entrée ou 'r' : réutiliser
-          HF_TOKEN_FOR_BUILD="$_CACHED"
-          echo -e "${GREEN}   ✓ Token réutilisé${NC}" ;;
-      esac
+    echo -e "${BLUE}   Que souhaitez-vous télécharger ?${NC}"
+    echo -e "   ${BLUE}[1]${NC} Tous — 24 modèles, 16 langues                ~1-3 h"
+    echo -e "   ${BLUE}[2]${NC} Rapide — 4 modèles (ja / fr+es+it+pt / de)   ~15-30 min"
+    echo -e "   ${BLUE}[3]${NC} Choisir par langue"
+    echo -e "   ${BLUE}[i]${NC} Ignorer — build sans traduction (OCR uniquement)"
+    echo ""
+    read -r -p "   > " _MC
 
-    elif [[ -n "${HF_TOKEN:-}" ]]; then
-      HF_TOKEN_FOR_BUILD="$HF_TOKEN"
-      echo -e "${BLUE}🔑 \$HF_TOKEN détecté ($(_hf_mask "$HF_TOKEN"))${NC}"
-      read -r -p "   Sauvegarder en cache local (.hf_token) pour les prochains builds ? [O/n] : " _SAVE
-      if [[ "${_SAVE,,}" != n* ]]; then
-        printf '%s' "$HF_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-        echo -e "${GREEN}   ✓ Token sauvegardé dans $HF_TOKEN_CACHE${NC}"
+    case "${_MC,,}" in
+      2)
+        echo -e "${GREEN}   → Sélection rapide (4 modèles)${NC}"
+        _MODELS_SELECTION="small"
+        ;;
+      3)
+        # Noms affichés et clés de modèles correspondantes (parallèles)
+        # en-mul couvre ja (>>jpn<<) et th (>>tha<<) — dédupliqué automatiquement
+        _LANG_NAMES=(
+          "Japonais              (ja-en, en-mul)"
+          "Chinois               (zh-en, en-zh)"
+          "Coréen                (ko-en, tc-big-en-ko)"
+          "Russe                 (ru-en, en-ru)"
+          "Arabe                 (ar-en, en-ar, tc-big-en-ar)"
+          "Hindi                 (hi-en, en-hi)"
+          "Thaï                  (th-en, en-mul)"
+          "Vietnamien            (vi-en, en-vi)"
+          "Roman. fr/es/it/pt    (ROMANCE-en, en-ROMANCE)"
+          "Allemand              (de-en, en-de)"
+          "Néerlandais           (nl-en, en-nl)"
+          "Polonais              (pl-en, en-sla)"
+        )
+        _LANG_KEYS=(
+          "ja-en,en-mul"
+          "zh-en,en-zh"
+          "ko-en,tc-big-en-ko"
+          "ru-en,en-ru"
+          "ar-en,en-ar,tc-big-en-ar"
+          "hi-en,en-hi"
+          "th-en,en-mul"
+          "vi-en,en-vi"
+          "ROMANCE-en,en-ROMANCE"
+          "de-en,en-de"
+          "nl-en,en-nl"
+          "pl-en,en-sla"
+        )
+        echo ""
+        echo -e "${BLUE}   Langues disponibles (toutes pivotent via l'anglais) :${NC}"
+        for i in "${!_LANG_NAMES[@]}"; do
+          printf "   %2d) %s\n" $((i+1)) "${_LANG_NAMES[$i]}"
+        done
+        echo ""
+        read -r -p "   Numéros séparés par espaces (ex: 1 4 9) : " _NUMS
+
+        # Construction de la liste dédupliquée (en-mul partagé entre ja et th)
+        declare -A _seen=()
+        _sel=""
+        for num in $_NUMS; do
+          if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#_LANG_NAMES[@]} )); then
+            IFS=',' read -ra _ms <<< "${_LANG_KEYS[$((num-1))]}"
+            for m in "${_ms[@]}"; do
+              if [[ -z "${_seen[$m]+x}" ]]; then
+                _seen[$m]=1
+                _sel="${_sel:+$_sel,}$m"
+              fi
+            done
+          fi
+        done
+        unset _seen
+
+        if [[ -z "$_sel" ]]; then
+          echo -e "${YELLOW}   Aucune sélection valide — build sans traduction${NC}"
+          _SKIP_MODELS=true
+        else
+          echo -e "${GREEN}   → $_sel${NC}"
+          _MODELS_SELECTION="$_sel"
+        fi
+        ;;
+      i*)
+        echo -e "${YELLOW}   Modèles ignorés — build sans traduction (OCR OK)${NC}"
+        _SKIP_MODELS=true
+        ;;
+      *)  # 1 ou Entrée : tous
+        echo -e "${GREEN}   → Tous les modèles (24)${NC}"
+        _MODELS_SELECTION="all"
+        ;;
+    esac
+  fi
+
+  if [[ "$_SKIP_MODELS" == false ]]; then
+    echo ""
+    echo -e "${YELLOW}   (~1-3 h au premier build selon la connexion)${NC}"
+    echo ""
+
+    # ── Token HuggingFace ────────────────────────────────────────────────────
+    # Cache local dans .hf_token (gitignore, chmod 600).
+    # Priorité : cache > $HF_TOKEN > prompt interactif.
+    HF_TOKEN_CACHE=".hf_token"
+    HF_TOKEN_FOR_BUILD=""
+    _hf_mask() { local t="$1"; echo "${t:0:8}****"; }
+
+    if [[ -t 0 ]]; then
+      # ── Mode interactif ────────────────────────────────────────────────────
+      if [[ -f "$HF_TOKEN_CACHE" ]]; then
+        _CACHED="$(< "$HF_TOKEN_CACHE")"
+        echo -e "${BLUE}🔑 Token HuggingFace en cache : $(_hf_mask "$_CACHED")${NC}"
+        echo -e "   ${BLUE}[Entrée]${NC} Réutiliser   ${BLUE}[n]${NC} Nouveau   ${BLUE}[s]${NC} Supprimer   ${BLUE}[i]${NC} Ignorer"
+        read -r -p "   > " _HF_CHOICE
+        case "${_HF_CHOICE,,}" in
+          n*)
+            read -r -p "   Nouveau token hf_... : " _NEW_TOKEN
+            if [[ -n "$_NEW_TOKEN" ]]; then
+              printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
+              HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
+              echo -e "${GREEN}   ✓ Token mis à jour${NC}"
+            else
+              HF_TOKEN_FOR_BUILD="$_CACHED"
+              echo -e "${BLUE}   Token inchangé${NC}"
+            fi ;;
+          s*)
+            rm -f "$HF_TOKEN_CACHE"
+            echo -e "${YELLOW}   Token supprimé du cache${NC}"
+            read -r -p "   Nouveau token (ou Entrée pour ignorer) : " _NEW_TOKEN
+            if [[ -n "$_NEW_TOKEN" ]]; then
+              printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
+              HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
+              echo -e "${GREEN}   ✓ Nouveau token sauvegardé${NC}"
+            fi ;;
+          i*)
+            echo -e "${YELLOW}   Token ignoré${NC}" ;;
+          *)  # Entrée ou 'r' : réutiliser
+            HF_TOKEN_FOR_BUILD="$_CACHED"
+            echo -e "${GREEN}   ✓ Token réutilisé${NC}" ;;
+        esac
+
+      elif [[ -n "${HF_TOKEN:-}" ]]; then
+        HF_TOKEN_FOR_BUILD="$HF_TOKEN"
+        echo -e "${BLUE}🔑 \$HF_TOKEN détecté ($(_hf_mask "$HF_TOKEN"))${NC}"
+        read -r -p "   Sauvegarder en cache local (.hf_token) pour les prochains builds ? [O/n] : " _SAVE
+        if [[ "${_SAVE,,}" != n* ]]; then
+          printf '%s' "$HF_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
+          echo -e "${GREEN}   ✓ Token sauvegardé dans $HF_TOKEN_CACHE${NC}"
+        fi
+
+      else
+        echo -e "${BLUE}🔑 Token HuggingFace (optionnel — évite le rate-limiting)${NC}"
+        echo -e "   Créer un token Read sur https://huggingface.co/settings/tokens"
+        read -r -p "   Token hf_... (Entrée pour ignorer) : " _NEW_TOKEN
+        if [[ -n "$_NEW_TOKEN" ]]; then
+          printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
+          HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
+          echo -e "${GREEN}   ✓ Token sauvegardé dans $HF_TOKEN_CACHE${NC}"
+        else
+          echo -e "${YELLOW}   Aucun token — les modèles publics fonctionnent sans.${NC}"
+        fi
       fi
 
     else
-      echo -e "${BLUE}🔑 Token HuggingFace (optionnel — évite le rate-limiting sur 24 téléchargements)${NC}"
-      echo -e "   Créer un token Read sur https://huggingface.co/settings/tokens"
-      read -r -p "   Token hf_... (Entrée pour ignorer) : " _NEW_TOKEN
-      if [[ -n "$_NEW_TOKEN" ]]; then
-        printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-        HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
-        echo -e "${GREEN}   ✓ Token sauvegardé dans $HF_TOKEN_CACHE${NC}"
-      else
-        echo -e "${YELLOW}   Aucun token — les modèles publics fonctionnent sans.${NC}"
+      # ── Mode non-interactif (CI) : cache ou $HF_TOKEN en silence ──────────
+      if [[ -f "$HF_TOKEN_CACHE" ]]; then
+        HF_TOKEN_FOR_BUILD="$(< "$HF_TOKEN_CACHE")"
+        echo -e "${BLUE}🔑 Token HuggingFace : .hf_token (cache)${NC}"
+      elif [[ -n "${HF_TOKEN:-}" ]]; then
+        HF_TOKEN_FOR_BUILD="$HF_TOKEN"
+        echo -e "${BLUE}🔑 Token HuggingFace : \$HF_TOKEN${NC}"
       fi
     fi
 
-  else
-    # ── Mode non-interactif (CI) : cache ou $HF_TOKEN en silence ────────────
-    if [[ -f "$HF_TOKEN_CACHE" ]]; then
-      HF_TOKEN_FOR_BUILD="$(< "$HF_TOKEN_CACHE")"
-      echo -e "${BLUE}🔑 Token HuggingFace : .hf_token (cache)${NC}"
-    elif [[ -n "${HF_TOKEN:-}" ]]; then
-      HF_TOKEN_FOR_BUILD="$HF_TOKEN"
-      echo -e "${BLUE}🔑 Token HuggingFace : \$HF_TOKEN${NC}"
+    echo ""
+    echo -e "${YELLOW}   Génération des modèles en cours...${NC}"
+    _HF_ARGS=()
+    [[ -n "$HF_TOKEN_FOR_BUILD" ]] && _HF_ARGS=("--hf-token" "$HF_TOKEN_FOR_BUILD")
+    _MODEL_ARGS=()
+    case "$_MODELS_SELECTION" in
+      "all")   ;;
+      "small") _MODEL_ARGS=("--small") ;;
+      *)       _MODEL_ARGS=("--models" "$_MODELS_SELECTION") ;;
+    esac
+
+    if ./scripts/prepare_translation_models.sh "${_HF_ARGS[@]}" "${_MODEL_ARGS[@]}" "$FLUTTER_MODELS_DIR"; then
+      MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
+      echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) généré(s)${NC}"
+    else
+      echo -e "${YELLOW}⚠️  Génération échouée — build sans traduction (OCR OK)${NC}"
     fi
   fi
-
-  echo ""
-  echo -e "${YELLOW}   Génération des modèles en cours...${NC}"
-  _HF_ARGS=()
-  [[ -n "$HF_TOKEN_FOR_BUILD" ]] && _HF_ARGS=("--hf-token" "$HF_TOKEN_FOR_BUILD")
-  if ./scripts/prepare_translation_models.sh "${_HF_ARGS[@]}" "$FLUTTER_MODELS_DIR"; then
-    MODELS_COUNT=$(find "$FLUTTER_MODELS_DIR" -name "model.bin" 2>/dev/null | wc -l)
-    echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) généré(s)${NC}"
-  else
-    echo -e "${YELLOW}⚠️  Génération échouée — build sans traduction (OCR OK)${NC}"
-  fi
-else
-  echo -e "${GREEN}✅ $MODELS_COUNT modèle(s) CTranslate2 trouvé(s)${NC}"
 fi
 
 # ── Flutter build (conditionnel) ─────────────────────────────────────────────

@@ -105,6 +105,56 @@ class TranslationService {
     ..add('en'); // Anglais toujours supporté
 
   // ============================================================================
+  // API STATIQUE — vérification des modèles sans instanciation
+  // ============================================================================
+
+  /// Répertoire de modèles téléchargés par l'utilisateur à l'exécution.
+  /// `$XDG_DATA_HOME/pdf-ocr-translator/translation_models/`
+  /// ou `~/.local/share/pdf-ocr-translator/translation_models/`
+  static String? userModelsDir() {
+    final xdg = Platform.environment['XDG_DATA_HOME'];
+    final base = (xdg != null && xdg.isNotEmpty)
+        ? xdg
+        : p.join(Platform.environment['HOME'] ?? '', '.local', 'share');
+    if (!base.contains('/')) return null;
+    return p.join(base, 'pdf-ocr-translator', 'translation_models');
+  }
+
+  /// Vérifie si [modelName] est disponible (téléchargé par l'utilisateur ou bundlé).
+  static bool isModelDirAvailable(String modelName) {
+    final userDir = userModelsDir();
+    if (userDir != null &&
+        File(p.join(userDir, modelName, 'model.bin')).existsSync()) {
+      return true;
+    }
+    final snap = Platform.environment['SNAP'];
+    final bundleBase = (snap != null && snap.isNotEmpty)
+        ? p.join(snap, 'data', 'flutter_assets', 'assets', 'translation_models')
+        : p.join(
+            p.dirname(Platform.resolvedExecutable),
+            'data', 'flutter_assets', 'assets', 'translation_models',
+          );
+    return File(p.join(bundleBase, modelName, 'model.bin')).existsSync();
+  }
+
+  /// Noms des répertoires de modèles requis pour traduire [from] → [to].
+  /// Utilise la même logique que [_findPath] mais de façon statique.
+  static Set<String> requiredModelDirs(String from, String to) {
+    if (from == to) return {};
+    if (_modelGraph.containsKey('$from-$to')) {
+      return {_modelGraph['$from-$to']!.$1};
+    }
+    final result = <String>{};
+    if (from != 'en' && to != 'en') {
+      final incoming = _modelGraph['$from-en'];
+      final outgoing = _modelGraph['en-$to'];
+      if (incoming != null) result.add(incoming.$1);
+      if (outgoing != null) result.add(outgoing.$1);
+    }
+    return result;
+  }
+
+  // ============================================================================
   // INITIALISATION
   // ============================================================================
 
@@ -302,32 +352,27 @@ class TranslationService {
   ///   debug  : `<exe_dir>/data/flutter_assets/assets/translation_models/{name}/`
   ///   dev    : `<app_support_dir>/translation_models/` (copié depuis assets)
   String _getModelDir(String modelName) {
-    // En mode snap : $SNAP est défini et pointe vers /snap/pdf-ocr-translator/xN
+    // 1. Modèles téléchargés à l'exécution (priorité sur les modèles bundlés)
+    final userDir = userModelsDir();
+    if (userDir != null) {
+      final userPath = p.join(userDir, modelName);
+      if (File(p.join(userPath, 'model.bin')).existsSync()) return userPath;
+    }
+
+    // 2. Modèles bundlés (snap ou debug)
     final snap = Platform.environment['SNAP'];
     if (snap != null && snap.isNotEmpty) {
       return p.join(snap, 'data', 'flutter_assets', 'assets', 'translation_models', modelName);
     }
-
-    // En mode debug/local : on utilise le répertoire des données de l'application
-    // Les modèles devraient être copiés depuis les assets au premier usage
     final exeDir = p.dirname(Platform.resolvedExecutable);
-    return p.join(
-      exeDir,
-      'data',
-      'flutter_assets',
-      'assets',
-      'translation_models',
-      modelName,
-    );
+    return p.join(exeDir, 'data', 'flutter_assets', 'assets', 'translation_models', modelName);
   }
 
   /// Vérifie si un modèle CTranslate2 est disponible sur le système de fichiers.
   ///
   /// Seul `model.bin` (format CTranslate2) est accepté par opusmt_translate.py.
   /// Les autres formats (onnx, pt, safetensors) ne sont pas supportés.
-  bool _isModelAvailable(String modelName) {
-    return File(p.join(_getModelDir(modelName), 'model.bin')).existsSync();
-  }
+  bool _isModelAvailable(String modelName) => isModelDirAvailable(modelName);
 
   // ============================================================================
   // EXÉCUTION PYTHON

@@ -14,6 +14,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WHEELS_DIR="$SCRIPT_DIR/../wheels"
 mkdir -p "$WHEELS_DIR"
 
+# ── Cache : évite de re-télécharger pip.pyz et les wheels à chaque build ──────
+# Un hash des packages requis + plateforme est comparé à wheels/.hash.
+# Si le hash correspond et qu'au moins un .whl est présent, on saute tout.
+_wheels_hash() {
+  printf '%s\n' \
+    "platform=manylinux_2_27_x86_64+cp312" \
+    "rapidocr-onnxruntime" "onnxruntime" "opencv-python" \
+    "ctranslate2" "sentencepiece" "fasttext-wheel" \
+  | md5sum | cut -d' ' -f1
+}
+
+WHEELS_HASH_FILE="$WHEELS_DIR/.hash"
+_current_hash=$(_wheels_hash)
+
+if [[ -f "$WHEELS_HASH_FILE" && "$(cat "$WHEELS_HASH_FILE")" == "$_current_hash" ]]; then
+  _whl_count=$(ls "$WHEELS_DIR"/*.whl 2>/dev/null | wc -l)
+  if [[ $_whl_count -gt 0 ]]; then
+    echo "✅ Wheels Python en cache ($_whl_count fichiers) — réutilisation"
+    exit 0
+  fi
+fi
+
 # Le pip système de Python 3.14 (≤ 25.1.1) a un bug de parsing JSON avec l'index
 # PyPI (PEP 691) : JSONDecodeError sur les réponses de l'index simple.
 # Correction : utiliser pip.pyz (bootstrap auto-contenu, pip ≥ 26.1.1).
@@ -80,3 +102,5 @@ echo "✅ Wheels téléchargés :"
 ls -lh "$WHEELS_DIR/"*.whl 2>/dev/null | awk '{print "   " $5 "\t" $9}' || true
 echo ""
 echo "Total : $(du -sh "$WHEELS_DIR/" | cut -f1)"
+
+echo "$_current_hash" > "$WHEELS_HASH_FILE"

@@ -361,6 +361,7 @@ SMALL_MODE=false
 CLEAN=false
 DEST_DIR="$DEFAULT_DEST"
 HF_TOKEN_ARG=""
+MODELS_FILTER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -369,6 +370,9 @@ while [[ $# -gt 0 ]]; do
     -s|--small)   SMALL_MODE=true; shift ;;
     -v|--verbose) VERBOSE=true; shift ;;
     --clean)      CLEAN=true; shift ;;
+    --models)
+      [[ -z "${2:-}" ]] && { echo "--models requiert une liste de clés (ex: ja-en,en-ROMANCE)"; exit 1; }
+      MODELS_FILTER="$2"; shift 2 ;;
     --hf-token)
       [[ -z "${2:-}" ]] && { echo "--hf-token requiert un TOKEN"; exit 1; }
       HF_TOKEN_ARG="$2"; shift 2 ;;
@@ -387,6 +391,9 @@ fi
 if [[ "$SMALL_MODE" == true ]]; then
   MODELS_TO_DO=("${SMALL_MODELS[@]}")
   echo "Mode --small : ${#MODELS_TO_DO[@]} modèles (${MODELS_TO_DO[*]})"
+elif [[ -n "$MODELS_FILTER" ]]; then
+  IFS=',' read -ra MODELS_TO_DO <<< "$MODELS_FILTER"
+  echo "Sélection : ${#MODELS_TO_DO[@]} modèles (${MODELS_TO_DO[*]})"
 else
   MODELS_TO_DO=("${ALL_MODELS[@]}")
   echo "Conversion de ${#MODELS_TO_DO[@]} modèles → $DEST_DIR"

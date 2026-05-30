@@ -1,11 +1,15 @@
+import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
 
 import '../models/language.dart';
 import '../models/language_detection.dart';
 import '../models/processing.dart';
 import '../services/pdf_service.dart';
+import '../services/translation_service.dart';
 import '../theme/app_theme.dart';
 
 // ─── Machine d'état ───────────────────────────────────────────────────────────
@@ -82,6 +86,10 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
   // Phase confirming
   List<PageLanguage> _pageLanguages = [];
 
+  // Disponibilité des modèles (calculée après la détection)
+  Map<String, bool> _modelStatus = {}; // modelName -> disponible
+  bool _modelsChecked = false;
+
   // Phase translating
   ProcessingUpdate _update = const ProcessingUpdate(
     currentPage: 0, totalPages: 1, stepName: 'Initialisation…',
@@ -135,6 +143,7 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           _pageLanguages = langs;
           _phase = _Phase.confirming;
         });
+        _checkModelAvailability();
       }
     } catch (e) {
       if (mounted) {
@@ -145,6 +154,33 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
       }
     }
   }
+
+  // ─── Vérification des modèles ─────────────────────────────────────────────
+
+  void _checkModelAvailability() {
+    final target = widget.targetLanguage ?? 'fr';
+    final required = <String>{};
+    for (final pl in _pageLanguages) {
+      if (!pl.skipTranslation) {
+        required.addAll(TranslationService.requiredModelDirs(pl.effectiveCode, target));
+      }
+    }
+    final status = {
+      for (final m in required) m: TranslationService.isModelDirAvailable(m),
+    };
+    if (mounted) setState(() { _modelStatus = status; _modelsChecked = true; });
+  }
+
+  Set<String> _missingModelsForPage(PageLanguage pl) {
+    if (!_modelsChecked || pl.skipTranslation) return {};
+    final target = widget.targetLanguage ?? 'fr';
+    return TranslationService.requiredModelDirs(pl.effectiveCode, target)
+        .where((m) => _modelStatus[m] == false)
+        .toSet();
+  }
+
+  Set<String> get _allMissingModels =>
+      _modelStatus.entries.where((e) => !e.value).map((e) => e.key).toSet();
 
   // ─── Phase 2 : Confirmation ───────────────────────────────────────────────
 
@@ -168,17 +204,57 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
     if (updated != null && mounted) {
       setState(() => _pageLanguages = updated);
+      _checkModelAvailability();
     }
   }
 
+  void _skipAffectedPages() {
+    setState(() {
+      _pageLanguages = _pageLanguages.map((pl) {
+        if (_missingModelsForPage(pl).isNotEmpty) return pl.withSkip(true);
+        return pl;
+      }).toList();
+    });
+    _checkModelAvailability();
+  }
+
+  void _showModelDownloadSheet(Set<String> missing) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        initialChildSize: 0.65,
+        maxChildSize: 0.95,
+        minChildSize: 0.5,
+        expand: false,
+        builder: (ctx, scroll) => _ModelDownloadSheet(
+          missingModels: missing,
+          scrollController: scroll,
+          onDownloadComplete: () {
+            if (mounted) _checkModelAvailability();
+          },
+        ),
+      ),
+    );
+  }
+
   Future<void> _confirmAndTranslate() async {
+    // Les pages dont les modèles sont toujours manquants seront ignorées (src = target)
+    final effectivePages = _pageLanguages.map((pl) {
+      if (pl.skipTranslation || _missingModelsForPage(pl).isNotEmpty) {
+        return pl.withOverride(widget.targetLanguage ?? 'fr');
+      }
+      return pl;
+    }).toList();
+
     _cleanupThumbnails();
     setState(() { _phase = _Phase.translating; });
 
     try {
       final outputPath = await _service.processPDF(
         pdfFile: File(widget.pdfPath!),
-        pageLanguages: _pageLanguages,
+        pageLanguages: effectivePages,
         targetLanguage: widget.targetLanguage ?? 'fr',
         outputPath: widget.outputPath!,
         onProgress: (update) {
@@ -294,30 +370,17 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
               separatorBuilder: (_, __) => const Divider(height: 1, indent: 16, endIndent: 16),
               itemBuilder: (ctx, i) {
                 final pl = _pageLanguages[i];
-                final langName = SupportedLanguages.getLanguageByCode(pl.effectiveCode).name;
-                final detectedName = SupportedLanguages.getLanguageByCode(pl.detectedCode).name;
-                return ListTile(
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  leading: GestureDetector(
-                    onTap: pl.thumbnailPath != null
-                        ? () => _showPageZoom(context, pl.thumbnailPath!)
-                        : null,
-                    child: _buildThumbnail(pl.thumbnailPath),
-                  ),
-                  title: Text('Page ${pl.pageNumber}',
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  subtitle: pl.isOverridden
-                      ? Text('$langName  ·  détecté : $detectedName',
-                          style: TextStyle(color: AppTheme.primaryColor, fontSize: 12))
-                      : Text(langName),
-                  trailing: pl.isOverridden
-                      ? const Icon(Icons.edit, size: 16, color: AppTheme.primaryColor)
-                      : null,
-                );
+                return _buildPageTile(pl);
               },
             ),
           ),
         ),
+
+        // Bannière modèles manquants
+        if (_modelsChecked && _allMissingModels.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _buildMissingModelsBanner(),
+        ],
 
         const SizedBox(height: 16),
 
@@ -346,9 +409,67 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     );
   }
 
-  Widget _buildThumbnail(String? path) {
+  Widget _buildPageTile(PageLanguage pl) {
+    final missing = _missingModelsForPage(pl);
+    final langName = pl.skipTranslation
+        ? 'Non traduit'
+        : SupportedLanguages.getLanguageByCode(pl.effectiveCode).name;
+    final detectedName = SupportedLanguages.getLanguageByCode(pl.detectedCode).name;
+
+    final isGray = pl.skipTranslation;
+    final textStyle = isGray
+        ? TextStyle(color: Colors.grey.shade500, fontStyle: FontStyle.italic)
+        : null;
+
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      leading: GestureDetector(
+        onTap: pl.thumbnailPath != null
+            ? () => _showPageZoom(context, pl.thumbnailPath!)
+            : null,
+        child: _buildThumbnail(pl.thumbnailPath, dim: isGray),
+      ),
+      title: Text('Page ${pl.pageNumber}',
+          style: TextStyle(fontWeight: FontWeight.w600).merge(textStyle)),
+      subtitle: pl.skipTranslation
+          ? Text('Non traduit', style: textStyle)
+          : pl.isOverridden
+              ? Text('$langName  ·  détecté : $detectedName',
+                  style: TextStyle(color: AppTheme.primaryColor, fontSize: 12))
+              : Text(langName),
+      trailing: _buildPageTrailing(pl, missing),
+    );
+  }
+
+  Widget? _buildPageTrailing(PageLanguage pl, Set<String> missing) {
+    if (pl.skipTranslation) {
+      return Tooltip(
+        message: 'Traduction ignorée (modèle absent)',
+        child: Icon(Icons.block, size: 18, color: Colors.grey.shade400),
+      );
+    }
+    final hasWarning = missing.isNotEmpty;
+    final hasEdit = pl.isOverridden;
+    if (!hasWarning && !hasEdit) return null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (hasEdit)
+          const Icon(Icons.edit, size: 16, color: AppTheme.primaryColor),
+        if (hasEdit && hasWarning) const SizedBox(width: 4),
+        if (hasWarning)
+          Tooltip(
+            message: 'Modèle manquant : ${missing.join(", ")}',
+            child: const Icon(Icons.warning_amber, size: 18, color: Colors.orange),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildThumbnail(String? path, {bool dim = false}) {
+    Widget img;
     if (path != null) {
-      return ClipRRect(
+      img = ClipRRect(
         borderRadius: BorderRadius.circular(4),
         child: Image.file(
           File(path),
@@ -357,8 +478,76 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
           errorBuilder: (_, __, ___) => const _PageIcon(),
         ),
       );
+    } else {
+      img = const _PageIcon();
     }
-    return const _PageIcon();
+    return dim ? Opacity(opacity: 0.35, child: img) : img;
+  }
+
+  Widget _buildMissingModelsBanner() {
+    final missing = _allMissingModels;
+    final affectedPages = _pageLanguages
+        .where((pl) => !pl.skipTranslation && _missingModelsForPage(pl).isNotEmpty)
+        .map((pl) => 'p.${pl.pageNumber}')
+        .join(', ');
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.orange.shade300),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Icon(Icons.warning_amber, size: 16, color: Colors.orange),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                '${missing.length} modèle${missing.length > 1 ? 's' : ''} manquant${missing.length > 1 ? 's' : ''}',
+                style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.orange),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 2),
+          Text(
+            '$affectedPages — ${missing.join(", ")}',
+            style: Theme.of(context)
+                .textTheme
+                .bodySmall
+                ?.copyWith(color: Colors.orange.shade800),
+          ),
+          const SizedBox(height: 6),
+          Row(children: [
+            TextButton.icon(
+              onPressed: _skipAffectedPages,
+              icon: const Icon(Icons.block, size: 15),
+              label: const Text('Passer ces pages'),
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.orange.shade800,
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const Spacer(),
+            FilledButton.icon(
+              onPressed: () => _showModelDownloadSheet(missing),
+              icon: const Icon(Icons.download, size: 15),
+              label: const Text('Télécharger'),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.orange,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
   }
 
   // ── UI : traduction ───────────────────────────────────────────────────────
@@ -487,48 +676,128 @@ class _PageIcon extends StatelessWidget {
   );
 }
 
-// ─── Feuille de personnalisation ──────────────────────────────────────────────
+// ─── Feuille de téléchargement des modèles ───────────────────────────────────
 
-class _CustomizationSheet extends StatefulWidget {
-  final List<PageLanguage> pageLanguages;
+class _ModelDownloadSheet extends StatefulWidget {
+  final Set<String> missingModels;
   final ScrollController scrollController;
+  final VoidCallback onDownloadComplete;
 
-  const _CustomizationSheet({
-    required this.pageLanguages,
+  const _ModelDownloadSheet({
+    required this.missingModels,
     required this.scrollController,
+    required this.onDownloadComplete,
   });
 
   @override
-  State<_CustomizationSheet> createState() => _CustomizationSheetState();
+  State<_ModelDownloadSheet> createState() => _ModelDownloadSheetState();
 }
 
-class _CustomizationSheetState extends State<_CustomizationSheet> {
-  bool _globalMode = true; // true = même langue pour tout le document
-  String _globalLang = 'en';
-  late List<PageLanguage> _pages;
+class _ModelDownloadSheetState extends State<_ModelDownloadSheet> {
+  final _tokenController = TextEditingController();
+  final _outputScroll = ScrollController();
+  bool _downloading = false;
+  bool _done = false;
+  String _output = '';
 
   @override
-  void initState() {
-    super.initState();
-    _pages = List.of(widget.pageLanguages);
-    // Initialiser la langue globale sur la première page
-    _globalLang = _pages.isNotEmpty ? _pages.first.effectiveCode : 'en';
+  void dispose() {
+    _tokenController.dispose();
+    _outputScroll.dispose();
+    super.dispose();
   }
 
-  void _applyGlobal() {
-    setState(() {
-      _pages = _pages.map((pl) => pl.withOverride(_globalLang)).toList();
+  // Remonte l'arborescence depuis l'exécutable pour trouver le script source
+  static String? _findPrepareScript() {
+    var dir = p.dirname(Platform.resolvedExecutable);
+    for (int i = 0; i < 8; i++) {
+      final candidate = p.join(dir, 'scripts', 'prepare_translation_models.sh');
+      if (File(candidate).existsSync()) return candidate;
+      final parent = p.dirname(dir);
+      if (parent == dir) break;
+      dir = parent;
+    }
+    return null;
+  }
+
+  Future<void> _runDownload() async {
+    setState(() { _downloading = true; _done = false; _output = ''; });
+
+    final script = _findPrepareScript();
+    final outputDir = TranslationService.userModelsDir();
+
+    if (script == null) {
+      // Mode snap ou dossier source inaccessible : afficher la commande à exécuter
+      final token = _tokenController.text.trim();
+      final tokenArg = token.isNotEmpty ? '\n    --hf-token $token \\' : '';
+      setState(() {
+        _output = '⚠  Script de conversion introuvable (mode snap).\n\n'
+            'Exécutez depuis le répertoire source du projet :\n\n'
+            '  ./scripts/prepare_translation_models.sh \\\n'
+            '    --models ${widget.missingModels.join(",")} \\$tokenArg\n'
+            '    flutter_app/assets/translation_models/\n\n'
+            'Puis relancez l\'application.';
+        _downloading = false;
+      });
+      return;
+    }
+
+    if (outputDir == null) {
+      setState(() {
+        _output = '⚠  Impossible de déterminer le répertoire utilisateur.';
+        _downloading = false;
+      });
+      return;
+    }
+
+    await Directory(outputDir).create(recursive: true);
+
+    final token = _tokenController.text.trim();
+    final args = [
+      script,
+      '--models', widget.missingModels.join(','),
+      if (token.isNotEmpty) ...['--hf-token', token],
+      outputDir,
+    ];
+
+    setState(() => _output = '→ Démarrage de la conversion...\n');
+
+    try {
+      final process = await Process.start('bash', args);
+
+      process.stdout.transform(utf8.decoder).forEach((chunk) {
+        if (mounted) setState(() { _output += chunk; _scrollToBottom(); });
+      });
+      process.stderr.transform(utf8.decoder).forEach((chunk) {
+        if (mounted) setState(() { _output += chunk; _scrollToBottom(); });
+      });
+
+      final exitCode = await process.exitCode;
+      if (mounted) {
+        setState(() {
+          _downloading = false;
+          _done = exitCode == 0;
+          _output += exitCode == 0
+              ? '\n✅ Téléchargement terminé.'
+              : '\n❌ Erreur (code $exitCode).';
+          _scrollToBottom();
+        });
+        if (exitCode == 0) widget.onDownloadComplete();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() { _output += '\n❌ Erreur : $e'; _downloading = false; });
+      }
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_outputScroll.hasClients) {
+        _outputScroll.jumpTo(_outputScroll.position.maxScrollExtent);
+      }
     });
   }
-
-  void _reset() {
-    setState(() {
-      _pages = _pages.map((pl) => pl.clearOverride()).toList();
-      if (_pages.isNotEmpty) _globalLang = _pages.first.detectedCode;
-    });
-  }
-
-  void _confirm() => Navigator.of(context).pop(_pages);
 
   @override
   Widget build(BuildContext context) {
@@ -552,7 +821,209 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
           ),
           const SizedBox(height: 12),
 
-          // Titre
+          // En-tête
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(children: [
+              const Icon(Icons.download, color: AppTheme.primaryColor),
+              const SizedBox(width: 10),
+              Text(
+                'Télécharger les modèles manquants',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                    ),
+              ),
+            ]),
+          ),
+
+          const Divider(height: 20),
+
+          Expanded(
+            child: ListView(
+              controller: widget.scrollController,
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
+              children: [
+                // Liste des modèles requis
+                Text('Modèles requis',
+                    style: Theme.of(context).textTheme.labelLarge),
+                const SizedBox(height: 6),
+                ...widget.missingModels.map((m) => Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Row(children: [
+                        const Icon(Icons.chevron_right, size: 16, color: AppTheme.primaryColor),
+                        const SizedBox(width: 4),
+                        Text(m, style: const TextStyle(fontFamily: 'monospace')),
+                      ]),
+                    )),
+
+                const SizedBox(height: 20),
+
+                // Token HuggingFace
+                Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                  Text('Token HuggingFace',
+                      style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    triggerMode: TooltipTriggerMode.tap,
+                    showDuration: const Duration(seconds: 8),
+                    message:
+                        'Optionnel, mais recommandé pour éviter le rate-limiting\n'
+                        'lors du téléchargement de plusieurs modèles.\n\n'
+                        'Pour créer un token gratuit :\n'
+                        '  1. Allez sur huggingface.co/settings/tokens\n'
+                        '  2. Cliquez "New token" → type "Read"\n'
+                        '  3. Copiez le token (commence par hf_...)',
+                    child: Icon(Icons.help_outline,
+                        size: 16, color: Colors.grey.shade500),
+                  ),
+                ]),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _tokenController,
+                  enabled: !_downloading,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    hintText: 'hf_... (optionnel)',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    prefixIcon: Icon(Icons.key, size: 18),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'huggingface.co/settings/tokens  →  "New token" → Read',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppTheme.textSecondary,
+                      ),
+                ),
+
+                // Zone de sortie (visible après démarrage)
+                if (_output.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Text('Sortie', style: Theme.of(context).textTheme.labelLarge),
+                  const SizedBox(height: 6),
+                  Container(
+                    height: 180,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade900,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Scrollbar(
+                      controller: _outputScroll,
+                      child: SingleChildScrollView(
+                        controller: _outputScroll,
+                        padding: const EdgeInsets.all(10),
+                        child: SelectableText(
+                          _output,
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 11,
+                            color: Colors.white70,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+
+          const Divider(height: 1),
+
+          // Boutons
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+            child: Row(children: [
+              TextButton(
+                onPressed: _downloading ? null : () => Navigator.of(context).pop(),
+                child: Text(_done ? 'Fermer' : 'Annuler'),
+              ),
+              const Spacer(),
+              if (_downloading)
+                const SizedBox(
+                  width: 20, height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              if (_downloading) const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed: _downloading || _done ? null : _runDownload,
+                icon: const Icon(Icons.download, size: 18),
+                label: Text(_done ? 'Terminé' : 'Télécharger'),
+              ),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Feuille de personnalisation ──────────────────────────────────────────────
+
+class _CustomizationSheet extends StatefulWidget {
+  final List<PageLanguage> pageLanguages;
+  final ScrollController scrollController;
+
+  const _CustomizationSheet({
+    required this.pageLanguages,
+    required this.scrollController,
+  });
+
+  @override
+  State<_CustomizationSheet> createState() => _CustomizationSheetState();
+}
+
+class _CustomizationSheetState extends State<_CustomizationSheet> {
+  bool _globalMode = true;
+  String _globalLang = 'en';
+  late List<PageLanguage> _pages;
+
+  @override
+  void initState() {
+    super.initState();
+    _pages = List.of(widget.pageLanguages);
+    _globalLang = _pages.isNotEmpty ? _pages.first.effectiveCode : 'en';
+  }
+
+  void _applyGlobal() {
+    setState(() {
+      _pages = _pages.map((pl) => pl.withOverride(_globalLang)).toList();
+    });
+  }
+
+  void _reset() {
+    setState(() {
+      _pages = _pages.map((pl) => pl.clearOverride().withSkip(false)).toList();
+      if (_pages.isNotEmpty) _globalLang = _pages.first.detectedCode;
+    });
+  }
+
+  void _confirm() => Navigator.of(context).pop(_pages);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Theme.of(context).scaffoldBackgroundColor,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 8),
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade400,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Row(
@@ -574,7 +1045,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
 
           const Divider(height: 1),
 
-          // Options radio
           Expanded(
             child: ListView(
               controller: widget.scrollController,
@@ -586,7 +1056,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Option 1 : langue unique
                       RadioListTile<bool>(
                         value: true,
                         title: const Text('Même langue pour tout le document'),
@@ -617,7 +1086,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
                           ),
                         ),
                       const SizedBox(height: 4),
-                      // Option 2 : par page
                       RadioListTile<bool>(
                         value: false,
                         title: const Text('Personnaliser page par page'),
@@ -635,7 +1103,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
 
           const Divider(height: 1),
 
-          // Bouton confirmer
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
             child: SizedBox(
@@ -657,7 +1124,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
       child: Row(
         children: [
-          // Miniature — clic pour zoom plein écran
           if (pl.thumbnailPath != null)
             GestureDetector(
               onTap: () => _showPageZoom(context, pl.thumbnailPath!),
@@ -674,8 +1140,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
           else
             const _PageIcon(),
           const SizedBox(width: 12),
-
-          // Numéro de page
           SizedBox(
             width: 56,
             child: Text(
@@ -684,8 +1148,6 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
             ),
           ),
           const SizedBox(width: 8),
-
-          // Dropdown compact
           Expanded(
             child: DropdownButtonFormField<String>(
               initialValue: pl.effectiveCode,

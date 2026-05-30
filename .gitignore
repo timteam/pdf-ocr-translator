@@ -111,6 +111,11 @@ snap/translation_models/
 *.vocab
 *.json
 
+# Exceptions : répertoires de modèles vides (placeholders pour Flutter/git)
+!flutter_app/assets/translation_models/
+!flutter_app/assets/translation_models/*/
+!flutter_app/assets/translation_models/*/.gitkeep
+
 # Exception : modèles ONNX statiques bundlés dans le snap
 !flutter_app/assets/models/
 !flutter_app/assets/models/onnx/
@@ -118,6 +123,9 @@ snap/translation_models/
 *.deb
 *.rpm
 .snapcraft_yaml_hash
+
+# Cache wheels Python (pip download)
+wheels/.hash
 
 # Token HuggingFace (cache local build-snap.sh, chmod 600)
 .hf_token
