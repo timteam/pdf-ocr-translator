@@ -220,7 +220,11 @@ setup_packages() {
 
 # ─── Installation de torch avec fallback PyPI ─────────────────────────────────
 # PyTorch héberge ses wheels CPU sur download-r2.pytorch.org (Cloudflare R2).
-# Si ce CDN est inaccessible, fallback sur PyPI (~532 MB, inclut CUDA).
+# Si ce CDN est inaccessible, fallback sur PyPI avec --no-deps pour éviter
+# ~1.5 GB de libs CUDA (nvidia-cudnn, nvidia-cusparselt, cuda-toolkit…)
+# inutiles en mode CPU. Les vraies dépendances CPU de torch (filelock, jinja2,
+# fsspec, sympy, mpmath, networkx, typing-extensions) sont déjà installées par
+# le premier pip (ctranslate2 + transformers les tirent en transitifs).
 _install_torch() {
   if PYTHONPATH="$PKGS_DIR" python3 -c "import torch" 2>/dev/null; then
     echo "→ torch déjà disponible — installation ignorée"
@@ -236,9 +240,10 @@ _install_torch() {
   fi
 
   echo ""
-  echo "⚠  CDN PyTorch inaccessible (download-r2.pytorch.org non résolu)."
-  echo "→ Tentative 2/2 : PyPI standard (~532 MB, inclut CUDA)..."
+  echo "⚠  CDN PyTorch (download-r2.pytorch.org) inaccessible."
+  echo "→ Tentative 2/2 : PyPI + --no-deps (~532 MB, sans libs CUDA)..."
   python3 "$PIP_PYZ" install torch \
+    --no-deps \
     --target "$PKGS_DIR" \
     --cache-dir "$PIP_CACHE_DIR"
 }
@@ -287,43 +292,25 @@ try:
     print(f"  Conversion CTranslate2 INT8...", flush=True)
 
     if os.path.exists(os.path.join(model_dir, "decoder.yml")):
-        # Format Marian original (rare sur HuggingFace, commun sur OPUS-MT direct)
+        # Format Marian original (decoder.yml + model.npz) — rare sur HuggingFace
         print(f"  Format: Marian original → OpusMTConverter")
         converter = ctranslate2.converters.OpusMTConverter(model_dir)
-    elif hasattr(ctranslate2.converters, "MarianConverter"):
-        # MarianConverter attend (model_dir, vocab_paths) — fournir les .spm du snapshot.
-        vocab_paths = sorted(
-            os.path.join(model_dir, f)
-            for f in os.listdir(model_dir)
-            if f.endswith(".spm") or f.endswith(".vocab")
-        )
-        if not vocab_paths:
-            raise RuntimeError(
-                f"Aucun fichier .spm trouvé dans {model_dir}.\n"
-                f"Fichiers présents : {sorted(os.listdir(model_dir))}"
-            )
-        print(f"  Format: HuggingFace PyTorch → MarianConverter "
-              f"({[os.path.basename(v) for v in vocab_paths]})")
-        converter = ctranslate2.converters.MarianConverter(model_dir, vocab_paths)
     elif hasattr(ctranslate2.converters, "TransformersConverter"):
-        # ctranslate2 3.x / certaines builds 4.x — convertisseur générique HF
+        # ctranslate2.converters.TransformersConverter gère le format HuggingFace
+        # PyTorch via des loaders enregistrés par type de config (MarianConfig,
+        # BartConfig, T5Config…). C'est le bon chemin pour tous les modèles HF.
         print(f"  Format: HuggingFace PyTorch → TransformersConverter")
-        try:
-            converter = ctranslate2.converters.TransformersConverter(
-                model_dir, low_cpu_mem_usage=True
-            )
-        except TypeError:
-            converter = ctranslate2.converters.TransformersConverter(model_dir)
+        converter = ctranslate2.converters.TransformersConverter(
+            model_dir, low_cpu_mem_usage=True
+        )
     else:
         available = sorted(
             x for x in dir(ctranslate2.converters)
             if "Converter" in x and not x.startswith("_")
         )
-        files = sorted(os.listdir(model_dir))
         raise RuntimeError(
-            f"Aucun convertisseur compatible pour les modèles HuggingFace PyTorch.\n"
-            f"Convertisseurs disponibles : {available}\n"
-            f"Fichiers dans {model_dir} : {files}"
+            f"TransformersConverter introuvable dans ctranslate2.converters.\n"
+            f"Disponibles : {available}"
         )
 
     converter.convert(out_dir, quantization="int8", force=True)
