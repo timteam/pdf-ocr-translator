@@ -121,3 +121,7 @@ snap/translation_models/
 
 # Token HuggingFace (cache local build-snap.sh, chmod 600)
 .hf_token
+
+# Cache packages de conversion (ctranslate2, torch, transformers)
+# Évite de re-télécharger ~500 MB à chaque build
+.ct2_cache/

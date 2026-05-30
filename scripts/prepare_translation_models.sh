@@ -119,29 +119,77 @@ display_model_list() {
   echo "Total : ${#MODEL_HF[@]} modèles"
 }
 
-# ─── Venv de conversion ───────────────────────────────────────────────────────
-# Répertoire de packages temporaires (--target, pas de venv requis)
-PKGS_DIR=""
+# ─── Cache persistant des packages de conversion ────────────────────────────
+# PKGS_DIR persiste entre les builds pour éviter de re-télécharger ctranslate2,
+# torch et leurs dépendances à chaque fois (~500 MB+ sinon).
+# Un hash des requirements détecte automatiquement quand une réinstallation
+# est nécessaire (changement de version, --clean).
+CACHE_BASE="${SCRIPT_DIR}/../.ct2_cache"
+PKGS_DIR="${CACHE_BASE}/pkgs"
+PIP_CACHE_DIR="${CACHE_BASE}/pip"
+PKGS_HASH_FILE="${CACHE_BASE}/pkgs.hash"
 PIP_PYZ=""
 
+# Empreinte des requirements : toute modification force une réinstallation
+_pkgs_hash() {
+  local py_ver
+  py_ver=$(python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null || echo "?")
+  printf '%s\n' \
+    "py=${py_ver}" \
+    "ctranslate2" \
+    "transformers>=4.40,<5.5" \
+    "huggingface_hub>=0.20" \
+    "sentencepiece" \
+    "torch-cpu" \
+  | md5sum | cut -d' ' -f1
+}
+
 setup_packages() {
-  PKGS_DIR=$(mktemp -d /tmp/ct2pkgs_XXXXXXXX)
+  mkdir -p "$PKGS_DIR" "$PIP_CACHE_DIR"
+
+  local current_hash
+  current_hash=$(_pkgs_hash)
+
+  # ── Vérifier la validité du cache ────────────────────────────────────────────
+  if [[ "$CLEAN" == false && -f "$PKGS_HASH_FILE" \
+        && "$(cat "$PKGS_HASH_FILE")" == "$current_hash" ]]; then
+    if PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2, torch" 2>/dev/null; then
+      local ct2_ver torch_ver
+      ct2_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2; print(ctranslate2.__version__)" 2>/dev/null || echo "?")
+      torch_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "?")
+      echo "→ Packages en cache : ctranslate2 $ct2_ver / torch $torch_ver"
+      echo "  (passer --clean pour forcer la réinstallation)"
+      echo ""
+      return 0
+    fi
+    echo "→ Cache invalide (import échoué) — réinstallation..."
+    rm -f "$PKGS_HASH_FILE"
+  fi
+
+  if [[ "$CLEAN" == true ]]; then
+    echo "→ --clean : invalidation du cache packages"
+    rm -rf "$PKGS_DIR" && mkdir -p "$PKGS_DIR"
+    rm -f "$PKGS_HASH_FILE"
+  fi
+
+  # ── Installation ─────────────────────────────────────────────────────────────
   PIP_PYZ=$(mktemp /tmp/pip_XXXXXXXX.pyz)
 
   echo "→ Téléchargement de pip bootstrap..."
   curl -fL --progress-bar "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ"
   echo ""
 
-  echo "→ Installation des dépendances (ctranslate2, transformers, huggingface_hub, sentencepiece, sacremoses)..."
-  echo "  (~2-5 min selon la connexion)"
+  echo "→ Installation des dépendances (ctranslate2, transformers, huggingface_hub, sentencepiece)..."
+  echo "  (~2-5 min à la première installation, puis depuis le cache pip)"
+  # transformers<5.5 : évite regex>=2025.10.22 (n'existe pas sur PyPI).
+  # sacremoses supprimé : MarianTokenizer utilise SentencePiece directement.
   python3 "$PIP_PYZ" install \
     ctranslate2 \
-    "transformers>=4.30" \
+    "transformers>=4.40,<5.5" \
     "huggingface_hub>=0.20" \
     sentencepiece \
-    sacremoses \
     --target "$PKGS_DIR" \
-    --no-cache-dir
+    --cache-dir "$PIP_CACHE_DIR"
 
   _install_torch || {
     echo "❌ Impossible d'installer torch — conversion abandonnée."
@@ -150,7 +198,7 @@ setup_packages() {
     exit 1
   }
 
-  # Sanity check : les deux imports critiques doivent fonctionner
+  # ── Sanity check ─────────────────────────────────────────────────────────────
   local ct2_ver torch_ver
   ct2_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2; print(ctranslate2.__version__)" 2>/dev/null || echo "")
   torch_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "")
@@ -158,23 +206,21 @@ setup_packages() {
   if [[ -z "$ct2_ver" || -z "$torch_ver" ]]; then
     echo ""
     echo "❌ Import check échoué :"
-    [[ -z "$ct2_ver" ]] && echo "   ctranslate2 non importable — vérifier le log pip ci-dessus"
-    [[ -z "$torch_ver" ]] && echo "   torch non importable — vérifier le log pip ci-dessus"
-    echo "   PYTHONPATH=$PKGS_DIR"
+    [[ -z "$ct2_ver" ]] && echo "   ctranslate2 non importable"
+    [[ -z "$torch_ver" ]] && echo "   torch non importable"
     PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2, torch" 2>&1 | head -5
     exit 1
   fi
 
   echo ""
   echo "→ ctranslate2 $ct2_ver / torch $torch_ver prêts"
+  echo "$current_hash" > "$PKGS_HASH_FILE"
   echo ""
 }
 
 # ─── Installation de torch avec fallback PyPI ─────────────────────────────────
-# Root cause : PyTorch héberge ses wheels sur Cloudflare R2 (download-r2.pytorch.org).
-# Si ce CDN est inaccessible (résolution DNS échouée, pare-feu), on tombe sur PyPI.
-# --upgrade évite les warnings "Target directory already exists" causés par les
-# dépendances communes déjà installées (filelock, fsspec, etc.) lors du premier pip.
+# PyTorch héberge ses wheels CPU sur download-r2.pytorch.org (Cloudflare R2).
+# Si ce CDN est inaccessible, fallback sur PyPI (~532 MB, inclut CUDA).
 _install_torch() {
   if PYTHONPATH="$PKGS_DIR" python3 -c "import torch" 2>/dev/null; then
     echo "→ torch déjà disponible — installation ignorée"
@@ -185,23 +231,21 @@ _install_torch() {
   if python3 "$PIP_PYZ" install torch \
       --index-url https://download.pytorch.org/whl/cpu \
       --target "$PKGS_DIR" \
-      --no-cache-dir \
-      --upgrade; then
+      --cache-dir "$PIP_CACHE_DIR"; then
     return 0
   fi
 
   echo ""
   echo "⚠  CDN PyTorch inaccessible (download-r2.pytorch.org non résolu)."
-  echo "→ Tentative 2/2 : PyPI standard (wheel CUDA+CPU, ~1.5 GB)..."
+  echo "→ Tentative 2/2 : PyPI standard (~532 MB, inclut CUDA)..."
   python3 "$PIP_PYZ" install torch \
     --target "$PKGS_DIR" \
-    --no-cache-dir \
-    --upgrade
+    --cache-dir "$PIP_CACHE_DIR"
 }
 
 cleanup_packages() {
-  [[ -n "$PKGS_DIR" && -d "$PKGS_DIR" ]] && rm -rf "$PKGS_DIR"
-  [[ -n "$PIP_PYZ"  && -f "$PIP_PYZ"  ]] && rm -f  "$PIP_PYZ"
+  # PKGS_DIR est persistant — ne supprimer que pip.pyz temporaire
+  [[ -n "$PIP_PYZ" && -f "$PIP_PYZ" ]] && rm -f "$PIP_PYZ"
 }
 trap cleanup_packages EXIT
 
@@ -218,27 +262,77 @@ convert_model() {
   py_script=$(mktemp /tmp/ct2_convert_XXXXXXXX.py)
   cat > "$py_script" <<'PYEOF'
 import sys, os, glob, shutil, tempfile, traceback
-import ctranslate2
-from transformers import MarianTokenizer
-from huggingface_hub import snapshot_download
 
 hf_id, out_dir = sys.argv[1], sys.argv[2]
 
 try:
-    # OpusMTConverter attend un chemin LOCAL (ouvre decoder.yml sur disque).
-    # snapshot_download télécharge le repo dans ~/.cache/huggingface/hub/ et
-    # retourne le chemin local ; les appels suivants sont instantanés (cache).
-    print(f"  Téléchargement {hf_id}...", flush=True)
-    model_dir = snapshot_download(repo_id=hf_id)
+    import ctranslate2
+    from transformers import MarianTokenizer
+    from huggingface_hub import snapshot_download
 
+    token = os.environ.get("HF_TOKEN") or None
+
+    # 1. Téléchargement du repo HuggingFace dans le cache local.
+    #    Les appels suivants (--clean mis à part) sont instantanés.
+    print(f"  Téléchargement {hf_id}...", flush=True)
+    model_dir = snapshot_download(repo_id=hf_id, token=token)
+
+    # 2. Sélection du convertisseur selon le format du modèle téléchargé.
+    #
+    #    Les modèles Helsinki-NLP sur HuggingFace sont en format PyTorch
+    #    (config.json + pytorch_model.bin / model.safetensors).
+    #    OpusMTConverter attend le format Marian original (decoder.yml +
+    #    model.npz) — il ne fonctionne PAS sur ces dépôts HuggingFace.
+    #    MarianConverter et TransformersConverter gèrent le format PyTorch.
     print(f"  Conversion CTranslate2 INT8...", flush=True)
-    converter = ctranslate2.converters.OpusMTConverter(model_dir)
+
+    if os.path.exists(os.path.join(model_dir, "decoder.yml")):
+        # Format Marian original (rare sur HuggingFace, commun sur OPUS-MT direct)
+        print(f"  Format: Marian original → OpusMTConverter")
+        converter = ctranslate2.converters.OpusMTConverter(model_dir)
+    elif hasattr(ctranslate2.converters, "MarianConverter"):
+        # MarianConverter attend (model_dir, vocab_paths) — fournir les .spm du snapshot.
+        vocab_paths = sorted(
+            os.path.join(model_dir, f)
+            for f in os.listdir(model_dir)
+            if f.endswith(".spm") or f.endswith(".vocab")
+        )
+        if not vocab_paths:
+            raise RuntimeError(
+                f"Aucun fichier .spm trouvé dans {model_dir}.\n"
+                f"Fichiers présents : {sorted(os.listdir(model_dir))}"
+            )
+        print(f"  Format: HuggingFace PyTorch → MarianConverter "
+              f"({[os.path.basename(v) for v in vocab_paths]})")
+        converter = ctranslate2.converters.MarianConverter(model_dir, vocab_paths)
+    elif hasattr(ctranslate2.converters, "TransformersConverter"):
+        # ctranslate2 3.x / certaines builds 4.x — convertisseur générique HF
+        print(f"  Format: HuggingFace PyTorch → TransformersConverter")
+        try:
+            converter = ctranslate2.converters.TransformersConverter(
+                model_dir, low_cpu_mem_usage=True
+            )
+        except TypeError:
+            converter = ctranslate2.converters.TransformersConverter(model_dir)
+    else:
+        available = sorted(
+            x for x in dir(ctranslate2.converters)
+            if "Converter" in x and not x.startswith("_")
+        )
+        files = sorted(os.listdir(model_dir))
+        raise RuntimeError(
+            f"Aucun convertisseur compatible pour les modèles HuggingFace PyTorch.\n"
+            f"Convertisseurs disponibles : {available}\n"
+            f"Fichiers dans {model_dir} : {files}"
+        )
+
     converter.convert(out_dir, quantization="int8", force=True)
     print(f"  model.bin + shared_vocabulary.json générés")
 
+    # 3. Copie des fichiers SPM (tokenizer)
     print(f"  Tokenizer SPM...", flush=True)
     with tempfile.TemporaryDirectory() as tmp:
-        tok = MarianTokenizer.from_pretrained(hf_id)
+        tok = MarianTokenizer.from_pretrained(hf_id, token=token)
         tok.save_pretrained(tmp)
         copied = []
         for pattern in ("*.spm", "*.model"):
@@ -247,13 +341,10 @@ try:
                 if not os.path.exists(dst):
                     shutil.copy(f, dst)
                     copied.append(os.path.basename(f))
-        if copied:
-            print(f"  Copiés : {', '.join(copied)}")
-        else:
-            print(f"  SPM déjà présents")
+        print(f"  Copiés : {', '.join(copied)}" if copied else f"  SPM déjà présents")
 
-    model_bin = os.path.join(out_dir, "model.bin")
-    if not os.path.exists(model_bin):
+    # 4. Vérification finale
+    if not os.path.exists(os.path.join(out_dir, "model.bin")):
         print(f"  ✗ model.bin absent dans {out_dir}", file=sys.stderr)
         sys.exit(1)
 
