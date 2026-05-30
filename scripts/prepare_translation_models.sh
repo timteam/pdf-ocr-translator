@@ -128,6 +128,13 @@ CACHE_BASE="${SCRIPT_DIR}/../.ct2_cache"
 PKGS_DIR="${CACHE_BASE}/pkgs"
 PIP_CACHE_DIR="${CACHE_BASE}/pip"
 PKGS_HASH_FILE="${CACHE_BASE}/pkgs.hash"
+# Cache des modèles HuggingFace (blobs LFS, par fichier avec hash SHA-256).
+# Pointe vers .ct2_cache/hf/ plutôt que ~/.cache/huggingface/ pour :
+#   - Rendre le cache visible et local au projet
+#   - Permettre la reprise fichier par fichier en cas d'interruption
+#   - Seuls les fichiers avec un hash LFS connu sur le dépôt sont mis en cache ;
+#     les autres sont re-téléchargés systématiquement.
+HF_CACHE_DIR="${CACHE_BASE}/hf"
 PIP_PYZ=""
 
 # Empreinte des requirements : toute modification force une réinstallation
@@ -347,7 +354,8 @@ PYEOF
   # Quand convert_model est appelée dans un `if`, bash suspend set -e à l'intérieur
   # de la fonction. Sans cette capture, rm -f (exit 0) masque l'échec de python3.
   local py_exit=0
-  PYTHONPATH="$PKGS_DIR" python3 "$py_script" "$hf_id" "$dest" || py_exit=$?
+  mkdir -p "$HF_CACHE_DIR"
+  PYTHONPATH="$PKGS_DIR" HF_HOME="$HF_CACHE_DIR" python3 "$py_script" "$hf_id" "$dest" || py_exit=$?
   rm -f "$py_script"
   return $py_exit
 }
@@ -357,6 +365,7 @@ VERBOSE=false
 LIST_ONLY=false
 SMALL_MODE=false
 CLEAN=false
+CLEAN_DOWNLOAD=false
 DEST_DIR="$DEFAULT_DEST"
 HF_TOKEN_ARG=""
 MODELS_FILTER=""
@@ -367,7 +376,8 @@ while [[ $# -gt 0 ]]; do
     -l|--list)    LIST_ONLY=true; shift ;;
     -s|--small)   SMALL_MODE=true; shift ;;
     -v|--verbose) VERBOSE=true; shift ;;
-    --clean)      CLEAN=true; shift ;;
+    --clean)           CLEAN=true; shift ;;
+    --clean-download)  CLEAN_DOWNLOAD=true; shift ;;
     --models)
       [[ -z "${2:-}" ]] && { echo "--models requiert une liste de clés (ex: ja-en,en-ROMANCE)"; exit 1; }
       MODELS_FILTER="$2"; shift 2 ;;
@@ -417,6 +427,20 @@ else
   echo "   $0 --hf-token hf_xxxx   ou   export HF_TOKEN=hf_xxxx"
 fi
 echo ""
+
+# ─── Cache de téléchargement HuggingFace ─────────────────────────────────────
+# --clean-download : vide uniquement le cache des blobs HF (.ct2_cache/hf/).
+# Les packages de conversion (torch, transformers…) sont conservés.
+if [[ "$CLEAN_DOWNLOAD" == true ]]; then
+  if [[ -d "$HF_CACHE_DIR" ]]; then
+    echo "→ --clean-download : suppression du cache HF ($HF_CACHE_DIR)..."
+    rm -rf "$HF_CACHE_DIR"
+    echo "   ✓ Cache vidé — les modèles seront re-téléchargés depuis HuggingFace"
+  else
+    echo "→ --clean-download : cache HF déjà vide"
+  fi
+  echo ""
+fi
 
 # ─── Packages de conversion ───────────────────────────────────────────────────
 setup_packages
