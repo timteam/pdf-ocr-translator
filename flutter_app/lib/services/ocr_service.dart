@@ -299,7 +299,12 @@ class OCRService {
 
       // Filtre texte garbage
       final filtered = raw.where((b) => !_isGarbageText(b.text)).toList();
-      logger.i('Filtrage garbage: ${raw.length} → ${filtered.length} blocs valides');
+      final rejected = raw.where((b) => _isGarbageText(b.text)).toList();
+      logger.i('Filtrage garbage: ${raw.length} → ${filtered.length} blocs valides (${rejected.length} rejetés)');
+      for (var i = 0; i < rejected.length; i++) {
+        final b = rejected[i];
+        logger.d('  rejeté[$i] → "${b.text}" | bb: ${b.boundingBox.left.toInt()},${b.boundingBox.top.toInt()} ${b.boundingBox.width.toInt()}×${b.boundingBox.height.toInt()}');
+      }
 
       // Inverse-rotation des bounding boxes si l'image a été pivotée
       final blocks = (angle.abs() >= 0.1)

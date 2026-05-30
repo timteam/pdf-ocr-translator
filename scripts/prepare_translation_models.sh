@@ -256,10 +256,17 @@ _install_torch() {
 }
 
 cleanup_packages() {
-  # PKGS_DIR est persistant — ne supprimer que pip.pyz temporaire
   [[ -n "$PIP_PYZ" && -f "$PIP_PYZ" ]] && rm -f "$PIP_PYZ"
 }
+_on_interrupt() {
+  echo ""
+  echo "⚠  Interruption (Ctrl+C) — arrêt."
+  echo "   Téléchargements partiels conservés dans .ct2_cache/hf/"
+  echo "   Relancez le script pour reprendre depuis le dernier modèle non converti."
+  exit 130
+}
 trap cleanup_packages EXIT
+trap _on_interrupt INT TERM
 
 # ─── Conversion d'un modèle ───────────────────────────────────────────────────
 convert_model() {
@@ -273,39 +280,79 @@ convert_model() {
   local py_script
   py_script=$(mktemp /tmp/ct2_convert_XXXXXXXX.py)
   cat > "$py_script" <<'PYEOF'
-import sys, os, glob, shutil, traceback
+import sys, os, glob, shutil, traceback, time
 
 hf_id, out_dir = sys.argv[1], sys.argv[2]
 
+# Timeout socket : 60s sans données → exception (au lieu de freeze infini).
+# HF_HUB_DOWNLOAD_TIMEOUT est lu par huggingface_hub avant toute requête.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+_MAX_RETRIES = 4
+_RETRY_WAITS = (5, 15, 30, 60)   # secondes entre tentatives
+
+def _download_with_retry(fn, label):
+    """Appelle fn() jusqu'à _MAX_RETRIES fois, avec backoff exponentiel."""
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn()
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if attempt == _MAX_RETRIES:
+                raise RuntimeError(f"{label} : échec après {_MAX_RETRIES} tentatives — {exc}") from exc
+            wait = _RETRY_WAITS[attempt - 1]
+            print(f"  ⚠  {label} (tentative {attempt}/{_MAX_RETRIES}) : {exc}", flush=True)
+            print(f"     Retry dans {wait}s…", flush=True)
+            time.sleep(wait)
+
 try:
     import ctranslate2
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import HfApi, hf_hub_download
 
     token = os.environ.get("HF_TOKEN") or None
+    api = HfApi()
 
-    # 1. Téléchargement du repo HuggingFace dans le cache local.
-    #    Les appels suivants (--clean mis à part) sont instantanés.
-    print(f"  Téléchargement {hf_id}...", flush=True)
-    model_dir = snapshot_download(repo_id=hf_id, token=token)
+    # 1. Lister les fichiers du dépôt (un seul appel API léger).
+    print(f"  Fichiers {hf_id}…", flush=True)
+    all_files = _download_with_retry(
+        lambda: sorted(api.list_repo_files(repo_id=hf_id, token=token)),
+        f"list_repo_files({hf_id})",
+    )
+    print(f"  {len(all_files)} fichier(s) à télécharger", flush=True)
 
-    # 2. Sélection du convertisseur selon le format du modèle téléchargé.
-    #
+    # 2. Téléchargement séquentiel fichier par fichier.
+    #    hf_hub_download() gère son propre cache (HF_HOME) : si le fichier est
+    #    déjà en cache et intact, il est retourné instantanément sans I/O réseau.
+    #    On évite ThreadPoolExecutor (snapshot_download) dont les workers peuvent
+    #    se bloquer indéfiniment sur un socket silencieux.
+    model_dir = None
+    for i, filename in enumerate(all_files, 1):
+        local_path = _download_with_retry(
+            lambda fn=filename: hf_hub_download(repo_id=hf_id, filename=fn, token=token),
+            f"[{i}/{len(all_files)}] {filename}",
+        )
+        if model_dir is None:
+            model_dir = os.path.dirname(local_path)
+        print(f"  [{i}/{len(all_files)}] {filename} ✓", flush=True)
+
+    # 3. Vérification des poids (snapshot parfois incomplet si blob LFS manquant).
+    _WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin", "model.pt")
+    if not any(os.path.exists(os.path.join(model_dir, f)) for f in _WEIGHT_FILES):
+        raise RuntimeError(
+            f"Snapshot incomplet : aucun fichier de poids dans {model_dir}\n"
+            f"  Cherché : {', '.join(_WEIGHT_FILES)}"
+        )
+
+    # 4. Sélection du convertisseur selon le format du modèle.
     #    Les modèles Helsinki-NLP sur HuggingFace sont en format PyTorch
     #    (config.json + pytorch_model.bin / model.safetensors).
-    #    OpusMTConverter attend le format Marian original (decoder.yml +
-    #    model.npz) — il ne fonctionne PAS sur ces dépôts HuggingFace.
-    #    MarianConverter et TransformersConverter gèrent le format PyTorch.
-    print(f"  Conversion CTranslate2 INT8...", flush=True)
-
+    #    OpusMTConverter attend le format Marian original (decoder.yml + model.npz).
+    #    TransformersConverter gère le format HuggingFace PyTorch.
+    print(f"  Conversion CTranslate2 INT8…", flush=True)
     if os.path.exists(os.path.join(model_dir, "decoder.yml")):
-        # Format Marian original (decoder.yml + model.npz) — rare sur HuggingFace
-        print(f"  Format: Marian original → OpusMTConverter")
         converter = ctranslate2.converters.OpusMTConverter(model_dir)
     elif hasattr(ctranslate2.converters, "TransformersConverter"):
-        # ctranslate2.converters.TransformersConverter gère le format HuggingFace
-        # PyTorch via des loaders enregistrés par type de config (MarianConfig,
-        # BartConfig, T5Config…). C'est le bon chemin pour tous les modèles HF.
-        print(f"  Format: HuggingFace PyTorch → TransformersConverter")
         converter = ctranslate2.converters.TransformersConverter(
             model_dir, low_cpu_mem_usage=True
         )
@@ -320,12 +367,10 @@ try:
         )
 
     converter.convert(out_dir, quantization="int8", force=True)
-    print(f"  model.bin + shared_vocabulary.json générés")
+    print(f"  model.bin + shared_vocabulary.json générés", flush=True)
 
-    # 3. Copie des fichiers SPM depuis le cache local (snapshot_download les a déjà).
-    #    On évite de rappeler MarianTokenizer.from_pretrained(hf_id) qui retente
-    #    une connexion réseau alors que la session httpx est déjà fermée.
-    print(f"  Tokenizer SPM...", flush=True)
+    # 5. Copie des fichiers SPM (déjà dans le cache — pas de reconnexion réseau).
+    print(f"  Tokenizer SPM…", flush=True)
     copied = []
     for pattern in ("*.spm", "*.model"):
         for f in glob.glob(os.path.join(model_dir, pattern)):
@@ -333,17 +378,19 @@ try:
             if not os.path.exists(dst):
                 shutil.copy(f, dst)
                 copied.append(os.path.basename(f))
-    print(f"  Copiés : {', '.join(copied)}" if copied else f"  SPM déjà présents")
+    print(f"  Copiés : {', '.join(copied)}" if copied else f"  SPM déjà présents", flush=True)
 
-    # 4. Vérification finale
+    # 6. Vérification finale
     if not os.path.exists(os.path.join(out_dir, "model.bin")):
-        print(f"  ✗ model.bin absent dans {out_dir}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"model.bin absent dans {out_dir} après conversion")
 
     size = sum(os.path.getsize(os.path.join(out_dir, f))
-               for f in os.listdir(out_dir)) / 1024 / 1024
-    print(f"  ✓ {out_dir} ({size:.0f} MB)")
+               for f in os.listdir(out_dir) if not f.startswith('.')) / 1024 / 1024
+    print(f"  ✓ {out_dir} ({size:.0f} MB)", flush=True)
 
+except KeyboardInterrupt:
+    print("\n  Interruption (Ctrl+C)", file=sys.stderr, flush=True)
+    sys.exit(130)
 except Exception as e:
     traceback.print_exc(file=sys.stderr)
     print(f"  ✗ {hf_id} : {e}", file=sys.stderr)
@@ -379,7 +426,7 @@ while [[ $# -gt 0 ]]; do
     --clean)           CLEAN=true; shift ;;
     --clean-download)  CLEAN_DOWNLOAD=true; shift ;;
     --models)
-      [[ -z "${2:-}" ]] && { echo "--models requiert une liste de clés (ex: ja-en,en-ROMANCE)"; exit 1; }
+      [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "❌ --models requiert une liste de clés (ex: --models ja-en,en-ROMANCE)"; exit 1; }
       MODELS_FILTER="$2"; shift 2 ;;
     --hf-token)
       [[ -z "${2:-}" ]] && { echo "--hf-token requiert un TOKEN"; exit 1; }
@@ -401,6 +448,14 @@ if [[ "$SMALL_MODE" == true ]]; then
   echo "Mode --small : ${#MODELS_TO_DO[@]} modèles (${MODELS_TO_DO[*]})"
 elif [[ -n "$MODELS_FILTER" ]]; then
   IFS=',' read -ra MODELS_TO_DO <<< "$MODELS_FILTER"
+  # Valider chaque clé
+  for _k in "${MODELS_TO_DO[@]}"; do
+    if [[ -z "${MODEL_HF[$_k]+x}" ]]; then
+      echo "❌ Clé inconnue : '$_k'"
+      echo "   Clés valides : ${ALL_MODELS[*]}"
+      exit 1
+    fi
+  done
   echo "Sélection : ${#MODELS_TO_DO[@]} modèles (${MODELS_TO_DO[*]})"
 else
   MODELS_TO_DO=("${ALL_MODELS[@]}")
@@ -427,6 +482,18 @@ else
   echo "   $0 --hf-token hf_xxxx   ou   export HF_TOKEN=hf_xxxx"
 fi
 echo ""
+
+# ─── Migration one-shot : ancien cache système → cache projet ────────────────
+# Si le cache HF projet est vide mais que ~/.cache/huggingface/hub/ contient
+# des modèles, on les copie pour ne pas perdre les téléchargements partiels.
+_SYS_HF_HUB="$HOME/.cache/huggingface/hub"
+if [[ -d "$_SYS_HF_HUB" && ! -d "$HF_CACHE_DIR/hub" ]]; then
+  echo "→ Migration du cache HuggingFace système → projet (.ct2_cache/hf/)..."
+  mkdir -p "$HF_CACHE_DIR"
+  cp -a "$_SYS_HF_HUB" "$HF_CACHE_DIR/hub"
+  echo "   ✓ Migration terminée — les téléchargements partiels sont préservés"
+  echo ""
+fi
 
 # ─── Cache de téléchargement HuggingFace ─────────────────────────────────────
 # --clean-download : vide uniquement le cache des blobs HF (.ct2_cache/hf/).
@@ -473,15 +540,23 @@ for key in "${MODELS_TO_DO[@]}"; do
   fi
 
   echo ""
-  echo "[$COUNT/$TOTAL] $key (${MODEL_HF[$key]})..."
+  echo "[$COUNT/$TOTAL] $key (${MODEL_HF[$key]:-?})..."
 
   if convert_model "$key" "$out_dir"; then
     DONE=$((DONE + 1))
     _print_bar "$DONE" "$TOTAL" "$key ✓"
   else
-    echo "  ✗ $key — échec"
+    _exit=$?
+    # Ctrl+C (130) ou segfault provoqué par l'interruption (139) → stop immédiat
+    if [[ $_exit -eq 130 || $_exit -eq 139 ]]; then
+      _on_interrupt
+    fi
+    echo "  ✗ $key — échec (code $_exit)"
     FAILED+=("$key")
-    rm -rf "$out_dir"
+    # Supprime les fichiers générés mais conserve le répertoire + .gitkeep
+    # (Flutter exige que les répertoires déclarés dans pubspec.yaml existent)
+    find "$out_dir" -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+    mkdir -p "$out_dir" && touch "$out_dir/.gitkeep"
     _print_bar "$DONE" "$TOTAL" "$key ✗"
   fi
   echo ""

@@ -66,28 +66,40 @@ def main():
     except ImportError:
         sys.exit("ctranslate2 non installé (pip install ctranslate2)")
 
+    def _log(msg):
+        print(msg, file=sys.stderr, flush=True)
+
+    _log(f"SPM source…")
     src_sp = load_sp(model_dir, "source.spm", "sentencepiece.bpe.model")
+    _log(f"SPM target…")
     tgt_sp = load_sp(model_dir, "target.spm", "sentencepiece.bpe.model")
 
     if src_sp is None:
         sys.exit(f"Aucun modèle SentencePiece trouvé dans {model_dir}")
     if tgt_sp is None:
         tgt_sp = src_sp  # Certains modèles partagent le même SPM
+    _log(f"SPM OK")
 
+    _log(f"ctranslate2.Translator chargement…")
     translator = ctranslate2.Translator(
         model_dir,
         device="cpu",
         inter_threads=2,
         intra_threads=2,
     )
+    _log(f"Modèle chargé")
 
+    _log(f"Lecture stdin…")
     try:
         texts = json.load(sys.stdin)
     except json.JSONDecodeError as e:
         sys.exit(f"Entrée JSON invalide : {e}")
+    _log(f"{len(texts)} segment(s) reçus")
 
     results = []
-    for text in texts:
+    for i, text in enumerate(texts):
+        if i % 20 == 0:
+            _log(f"Traduction {i}/{len(texts)}…")
         if not text or not text.strip():
             results.append(text or "")
             continue
@@ -98,7 +110,9 @@ def main():
         ]
         results.append("\n".join(translated_lines))
 
+    _log(f"Traduction terminée ({len(results)} résultats) — écriture stdout…")
     json.dump(results, sys.stdout, ensure_ascii=False)
+    _log(f"OK")
 
 
 if __name__ == "__main__":

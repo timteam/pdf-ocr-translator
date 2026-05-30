@@ -83,9 +83,34 @@ if ! PYTHONPATH="$PKGS_DIR" python3 -c "import huggingface_hub" 2>/dev/null; the
 fi
 
 # ─── Script Python principal ──────────────────────────────────────────────────
-PYTHONPATH="$PKGS_DIR" python3 <<'PYEOF'
-import os, sys, hashlib
+# Le script est écrit dans un fichier temporaire plutôt qu'injecté via heredoc.
+# Un heredoc devient le stdin de python3, ce qui vide stdin avant que input()
+# soit appelé → EOFError immédiat → "Annulé". Avec un fichier .py, stdin reste
+# connecté au terminal et input() fonctionne normalement.
+_PY_UPLOAD=$(mktemp /tmp/upload_hf_XXXXXXXX.py)
+trap 'rm -f "$_PY_UPLOAD"' EXIT
+
+cat > "$_PY_UPLOAD" <<'PYEOF'
+import os, sys, hashlib, time
 from pathlib import Path
+
+# Timeouts explicites pour le backend HTTP (httpx).
+# HF_HUB_DOWNLOAD_TIMEOUT couvre les lectures courtes ; pour l'upload
+# de gros fichiers (model.bin ~80-300 Mo), le serveur HF peut prendre
+# plusieurs minutes à finaliser l'enregistrement LFS après réception du
+# dernier octet → on fixe un read/write timeout plus long.
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
+
+try:
+    import httpx
+    from huggingface_hub import configure_http_backend
+    configure_http_backend(
+        backend_factory=lambda: httpx.Client(
+            timeout=httpx.Timeout(connect=30, read=300, write=600, pool=30),
+        )
+    )
+except Exception:
+    pass  # huggingface_hub < 0.22 ou httpx absent : on continue sans
 
 # ── Env ───────────────────────────────────────────────────────────────────────
 repo_id         = os.environ['_HF_REPO']
@@ -93,6 +118,23 @@ token           = os.environ.get('_HF_TOKEN') or None
 models_dir      = Path(os.environ['_MODELS_DIR'])
 non_interactive = os.environ.get('_NON_INTERACTIVE', 'false') == 'true'
 preselect_str   = os.environ.get('_PRESELECT', '')
+
+_MAX_RETRIES  = 4
+_RETRY_WAITS  = (5, 15, 30, 60)
+
+def _with_retry(fn, label):
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn()
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            if attempt == _MAX_RETRIES:
+                raise RuntimeError(f"{label} : échec après {_MAX_RETRIES} tentatives — {exc}") from exc
+            wait = _RETRY_WAITS[attempt - 1]
+            print(f"  ⚠  {label} (tentative {attempt}/{_MAX_RETRIES}) : {exc}")
+            print(f"     Retry dans {wait}s…")
+            time.sleep(wait)
 
 # ── Couleurs ANSI ─────────────────────────────────────────────────────────────
 G = '\033[0;32m'; Y = '\033[1;33m'; B = '\033[0;34m'
@@ -126,16 +168,22 @@ repo_exists   = True
 
 print(f"\n{B}🔍 Lecture du dépôt {repo_id}…{N}")
 try:
-    for item in api.list_repo_tree(
-        repo_id=repo_id, repo_type="dataset",
-        recursive=True, token=token,
-    ):
-        if not hasattr(item, 'path') or not hasattr(item, 'size'):
-            continue  # c'est un dossier
-        lfs = getattr(item, 'lfs', None)
-        sha = getattr(lfs, 'sha256', None) if lfs else None
-        remote_hashes[item.path] = sha
+    def _fetch_tree():
+        result = {}
+        for item in api.list_repo_tree(
+            repo_id=repo_id, repo_type="dataset",
+            recursive=True, token=token,
+        ):
+            if not hasattr(item, 'path') or not hasattr(item, 'size'):
+                continue
+            lfs = getattr(item, 'lfs', None)
+            sha = getattr(lfs, 'sha256', None) if lfs else None
+            result[item.path] = sha
+        return result
+    remote_hashes = _with_retry(_fetch_tree, f"list_repo_tree({repo_id})")
     print(f"   {G}✓ {len(remote_hashes)} fichier(s) indexé(s){N}\n")
+except KeyboardInterrupt:
+    raise
 except Exception as e:
     err = str(e)
     if '404' in err or 'not found' in err.lower():
@@ -283,26 +331,47 @@ print(f"\n{B}📤 Upload de {len(to_upload)} modèle(s)…{N}\n")
 
 ok_uploads, fail_uploads = [], []
 
-for key in to_upload:
-    model_path = models_dir / key
-    files = [f for f in model_path.iterdir() if f.is_file() and not f.name.startswith('.')]
-    size_mb = sum(f.stat().st_size for f in files) / 1048576
-    r = next(x for x in results if x['key'] == key)
-    badge = '🆕' if r['status'] == NEW else '🔄'
-    print(f"  {badge} {key}  ({size_mb:.0f} Mo, {len(files)} fichier(s))…")
-    try:
-        api.upload_folder(
-            folder_path=str(model_path),
-            path_in_repo=key,
-            repo_id=repo_id,
-            repo_type="dataset",
-            ignore_patterns=[".*"],
-        )
-        print(f"     {G}✅ {key}{N}")
-        ok_uploads.append(key)
-    except Exception as e:
-        print(f"     {R}❌ {key} : {e}{N}")
-        fail_uploads.append(key)
+try:
+    for key in to_upload:
+        model_path = models_dir / key
+        files = sorted(f for f in model_path.iterdir() if f.is_file() and not f.name.startswith('.'))
+        size_mb = sum(f.stat().st_size for f in files) / 1048576
+        r = next(x for x in results if x['key'] == key)
+        badge = '🆕' if r['status'] == NEW else '🔄'
+        print(f"  {badge} {key}  ({size_mb:.0f} Mo, {len(files)} fichier(s))…")
+
+        file_ok, file_fail = [], []
+        for fpath in files:
+            path_in_repo = f"{key}/{fpath.name}"
+            try:
+                _with_retry(
+                    lambda p=fpath, rp=path_in_repo: api.upload_file(
+                        path_or_fileobj=str(p),
+                        path_in_repo=rp,
+                        repo_id=repo_id,
+                        repo_type="dataset",
+                    ),
+                    f"{key}/{fpath.name}",
+                )
+                print(f"     {G}✓ {fpath.name}{N}")
+                file_ok.append(fpath.name)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(f"     {R}✗ {fpath.name} : {e}{N}")
+                file_fail.append(fpath.name)
+
+        if file_fail:
+            print(f"     {R}❌ {key} — {len(file_fail)} fichier(s) échoué(s) : {', '.join(file_fail)}{N}")
+            fail_uploads.append(key)
+        else:
+            print(f"     {G}✅ {key}{N}")
+            ok_uploads.append(key)
+
+except KeyboardInterrupt:
+    print(f"\n{Y}⚠  Interruption — upload interrompu.{N}")
+    print(f"   Modèles partiellement uploadés peuvent être incomplets sur HF.")
+    sys.exit(130)
 
 print()
 summary = f"{G}✅ {len(ok_uploads)} modèle(s) uploadé(s){N}"
@@ -314,3 +383,5 @@ print(f"\n   Dépôt : https://huggingface.co/datasets/{repo_id}\n")
 if fail_uploads:
     sys.exit(1)
 PYEOF
+
+PYTHONPATH="$PKGS_DIR" python3 "$_PY_UPLOAD"

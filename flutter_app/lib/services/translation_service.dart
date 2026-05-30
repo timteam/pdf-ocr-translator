@@ -386,40 +386,58 @@ class TranslationService {
     String? langToken,
   ) async {
     final logPrefix = '[$pair]';
-    logger.d('$logPrefix opusmt_translate.py (${texts.length} segment(s))');
 
     final args = [_scriptPath, modelDir];
     if (langToken != null) {
       args.addAll(['--token', langToken]);
     }
 
-    final process = await Process.start(
-      'python3.12',
-      args,
-      environment: _buildPythonEnv(),
-    );
+    final env = _buildPythonEnv();
+    final pythonBin = 'python3.12';
+    logger.d('$logPrefix CMD: $pythonBin ${args.join(' ')}');
+    logger.d('$logPrefix PYTHONPATH=${env['PYTHONPATH'] ?? '(non défini)'}');
+    logger.d('$logPrefix LD_LIBRARY_PATH=${env['LD_LIBRARY_PATH'] ?? '(non défini)'}');
 
-    // Envoi des textes via stdin (JSON)
-    process.stdin.write(json.encode(texts));
-    await process.stdin.close();
+    final Process process;
+    try {
+      process = await Process.start(pythonBin, args, environment: env);
+    } catch (e) {
+      throw Exception('$logPrefix Impossible de démarrer $pythonBin : $e');
+    }
+    logger.d('$logPrefix Processus démarré (PID=${process.pid})');
 
-    // Lecture de stdout
-    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
-
-    // Gestion des erreurs stderr
-    process.stderr.transform(utf8.decoder).forEach((chunk) {
+    // Abonnement stderr AVANT l'écriture stdin pour éviter tout risque de
+    // remplissage du pipe si Python écrit des messages au démarrage.
+    final stderrBuffer = StringBuffer();
+    final stderrDone = process.stderr.transform(utf8.decoder).forEach((chunk) {
       for (final line in chunk.split('\n')) {
-        if (line.trim().isNotEmpty) {
-          logger.w('$logPrefix stderr: $line');
+        final l = line.trim();
+        if (l.isNotEmpty) {
+          logger.i('$logPrefix py: $l');
+          stderrBuffer.writeln(l);
         }
       }
     });
 
+    // Envoi JSON via stdin
+    final jsonStr = json.encode(texts);
+    logger.d('$logPrefix stdin → ${jsonStr.length} octets (${texts.length} segments)');
+    process.stdin.write(jsonStr);
+    await process.stdin.close();
+    logger.d('$logPrefix stdin fermé — en attente de stdout…');
+
+    // Lecture de stdout
+    final stdoutFuture = process.stdout.transform(utf8.decoder).join();
     final output = await stdoutFuture;
+    await stderrDone;
     final exitCode = await process.exitCode;
 
+    logger.d('$logPrefix stdout=${output.length} octets · exit=$exitCode');
+
     if (exitCode != 0) {
-      throw Exception('opusmt_translate.py $pair: exit code $exitCode');
+      throw Exception(
+        '$logPrefix opusmt_translate.py exit=$exitCode\n${stderrBuffer.toString().trim()}',
+      );
     }
 
     final decoded = json.decode(output);
