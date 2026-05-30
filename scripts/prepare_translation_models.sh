@@ -266,13 +266,12 @@ convert_model() {
   local py_script
   py_script=$(mktemp /tmp/ct2_convert_XXXXXXXX.py)
   cat > "$py_script" <<'PYEOF'
-import sys, os, glob, shutil, tempfile, traceback
+import sys, os, glob, shutil, traceback
 
 hf_id, out_dir = sys.argv[1], sys.argv[2]
 
 try:
     import ctranslate2
-    from transformers import MarianTokenizer
     from huggingface_hub import snapshot_download
 
     token = os.environ.get("HF_TOKEN") or None
@@ -316,19 +315,18 @@ try:
     converter.convert(out_dir, quantization="int8", force=True)
     print(f"  model.bin + shared_vocabulary.json générés")
 
-    # 3. Copie des fichiers SPM (tokenizer)
+    # 3. Copie des fichiers SPM depuis le cache local (snapshot_download les a déjà).
+    #    On évite de rappeler MarianTokenizer.from_pretrained(hf_id) qui retente
+    #    une connexion réseau alors que la session httpx est déjà fermée.
     print(f"  Tokenizer SPM...", flush=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        tok = MarianTokenizer.from_pretrained(hf_id, token=token)
-        tok.save_pretrained(tmp)
-        copied = []
-        for pattern in ("*.spm", "*.model"):
-            for f in glob.glob(os.path.join(tmp, pattern)):
-                dst = os.path.join(out_dir, os.path.basename(f))
-                if not os.path.exists(dst):
-                    shutil.copy(f, dst)
-                    copied.append(os.path.basename(f))
-        print(f"  Copiés : {', '.join(copied)}" if copied else f"  SPM déjà présents")
+    copied = []
+    for pattern in ("*.spm", "*.model"):
+        for f in glob.glob(os.path.join(model_dir, pattern)):
+            dst = os.path.join(out_dir, os.path.basename(f))
+            if not os.path.exists(dst):
+                shutil.copy(f, dst)
+                copied.append(os.path.basename(f))
+    print(f"  Copiés : {', '.join(copied)}" if copied else f"  SPM déjà présents")
 
     # 4. Vérification finale
     if not os.path.exists(os.path.join(out_dir, "model.bin")):

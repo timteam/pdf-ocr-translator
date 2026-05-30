@@ -169,10 +169,27 @@ sudo snap install gnome-46-2404
 
 Python, les wheels et poppler ne sont **pas** à installer sur la machine de build — ils sont téléchargés et bundlés automatiquement.
 
-### Préparer les modèles de traduction (une fois)
+### Modèles de traduction — deux modes de livraison
+
+Les modèles Helsinki-NLP sont en format **PyTorch** sur HuggingFace. L'app utilise **CTranslate2** comme moteur d'inférence — format incompatible, plus léger (INT8 ~45 MB vs PyTorch ~300 MB), sans dépendance à PyTorch au runtime. Une conversion one-shot est donc nécessaire.
+
+```
+HuggingFace (PyTorch ~300 MB)
+        │
+  [prepare_translation_models.sh]   ← conversion CTranslate2 INT8, one-shot dev
+        │
+  ┌─────┴──────────────────────────────────┐
+  │                                        │
+  ▼                                        ▼
+Bundlé dans le snap              Téléchargeable à la volée
+flutter_app/assets/              depuis l'app (runtime)
+translation_models/              → ~/.local/share/pdf-ocr-translator/
+                                   translation_models/
+```
+
+**Mode 1 — Bundlé dans le snap (build-time)**
 
 ```bash
-# Télécharge les 24 modèles Helsinki-NLP et les convertit en CTranslate2 INT8
 chmod +x scripts/prepare_translation_models.sh
 ./scripts/prepare_translation_models.sh
 
@@ -184,6 +201,32 @@ chmod +x scripts/prepare_translation_models.sh
 ```
 
 Les modèles (~50 MB chacun) sont écrits dans `flutter_app/assets/translation_models/` et bundlés dans le snap au prochain build.
+
+**Mode 2 — Téléchargement à la volée depuis l'app (runtime)**
+
+L'app détecte les modèles manquants sur l'écran de confirmation et propose de les télécharger directement — sans sortir de l'interface, sans script, en mode snap comme en mode dev.
+
+Les modèles sont téléchargés depuis un dépôt HuggingFace Dataset hébergeant les binaires CTranslate2 pré-convertis, et stockés dans `~/.local/share/pdf-ocr-translator/translation_models/` (prioritaire sur les modèles bundlés).
+
+Pour activer ce mode, le développeur doit uploader les modèles convertis une fois :
+
+```bash
+# 1. Convertir
+./scripts/prepare_translation_models.sh --small --hf-token hf_...
+
+# 2. Uploader vers le dépôt HF Dataset
+./scripts/upload_models_to_hf.sh \
+  --repo Timteamteem/opus-mt-ct2 \
+  --hf-token hf_...
+
+# 3. Mettre à jour la constante dans Flutter
+#    flutter_app/lib/services/model_download_service.dart
+#    → const String kModelHfRepo = 'Timteamteem/opus-mt-ct2';
+```
+
+Dépôt des modèles pré-convertis : [huggingface.co/datasets/Timteamteem/opus-mt-ct2](https://huggingface.co/datasets/Timteamteem/opus-mt-ct2)
+
+> **Pourquoi pas ONNX ?** ONNX Runtime est déjà bundlé pour l'OCR (forward pass simple). La traduction seq2seq nécessite une boucle autorégressive (beam search) que ONNX Runtime ne fournit pas — il faudrait l'implémenter manuellement. CTranslate2 l'encapsule en C++ et produit des modèles 6× plus petits que l'export ONNX fp32.
 
 #### Token HuggingFace (recommandé)
 
@@ -244,7 +287,8 @@ pdf-ocr-translator/
 │   │   ├── services/
 │   │   │   ├── pdf_service.dart          # Orchestration pdfinfo/pdftoppm/pdfunite
 │   │   │   ├── ocr_service.dart          # RapidOCR + FastText + deskew
-│   │   │   └── translation_service.dart  # Graphe de pivots Opus-MT
+│   │   │   ├── translation_service.dart  # Graphe de pivots Opus-MT
+│   │   │   └── model_download_service.dart # Téléchargement HTTP depuis HF Dataset
 │   │   └── models/
 │   │       ├── language.dart             # 16 langues supportées
 │   │       ├── language_detection.dart   # PageLanguage (code, surcharge, miniature)
@@ -270,7 +314,8 @@ pdf-ocr-translator/
 ├── scripts/
 │   ├── download_fasttext_model.sh        # Télécharge lid.176.ftz
 │   ├── download_pip_wheels.sh            # Télécharge les wheels Python
-│   └── prepare_translation_models.sh    # Convertit les modèles Opus-MT → CTranslate2
+│   ├── prepare_translation_models.sh    # Convertit les modèles Opus-MT → CTranslate2
+│   └── upload_models_to_hf.sh           # Upload des modèles convertis vers HF Dataset
 ├── snapcraft.yaml                        # Snap (core24, confinement strict)
 ├── build-snap.sh                         # Orchestration du build complet
 └── install-local.sh                      # Installation + connexion GTK3
@@ -298,7 +343,7 @@ pdf-ocr-translator/
 - **OCR manuscrit** : PP-OCRv4 est optimisé pour le texte imprimé
 - **PDF vectoriel** : l'OCR n'est pas utile si le PDF contient déjà du texte sélectionnable
 - **Mise en page complexe** : les bounding boxes texte sont superposées mais la police de substitution ne correspond pas toujours à l'original
-- **Modèles de traduction** : doivent être générés avant le build snap (`prepare_translation_models.sh`) ; l'application ne les télécharge pas à l'exécution
+- **Modèles de traduction** : peuvent être bundlés dans le snap (build-time via `prepare_translation_models.sh`) ou téléchargés à la volée depuis l'app — les modèles doivent avoir été uploadés sur le dépôt HF (`upload_models_to_hf.sh`) pour que le téléchargement runtime fonctionne
 
 ---
 
@@ -308,6 +353,6 @@ Apache License 2.0 — voir [LICENSE](LICENSE)
 
 ## Crédits
 
-[RapidOCR](https://github.com/RapidAI/RapidOCR) · [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [ONNX Runtime](https://onnxruntime.ai) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [Opus-MT / Helsinki-NLP](https://huggingface.co/Helsinki-NLP) · [FastText](https://fasttext.cc) · [Flutter](https://flutter.dev)
+[RapidOCR](https://github.com/RapidAI/RapidOCR) · [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [ONNX Runtime](https://onnxruntime.ai) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [Opus-MT / Helsinki-NLP](https://huggingface.co/Helsinki-NLP) · [Modèles CTranslate2 pré-convertis](https://huggingface.co/datasets/Timteamteem/opus-mt-ct2) · [FastText](https://fasttext.cc) · [Flutter](https://flutter.dev)
 
 Issues et contributions : [github.com/AgentLeChat/pdf-ocr-translator](https://github.com/AgentLeChat/pdf-ocr-translator)

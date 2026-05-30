@@ -46,6 +46,7 @@ apps:
       - x11              # fallback X11 / XWayland
       - removable-media  # accès disques amovibles et montages externes
       - gnome-46-2404    # content snap : GTK3 + GDK-Pixbuf + libepoxy
+      - network          # téléchargement des modèles de traduction à la volée
     environment:
       PYTHONPATH: $SNAP/pyenv
       # GTK3 / GDK-Pixbuf / libepoxy viennent du content snap monté à runtime

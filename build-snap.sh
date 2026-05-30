@@ -58,11 +58,16 @@ _ALL_MODEL_DIRS=(
   "en-vi" "en-mul" "en-sla" "tc-big-en-ar" "tc-big-en-ko"
 )
 _MISSING_DIRS=()
+_PRESENT_DIRS=()
 for _d in "${_ALL_MODEL_DIRS[@]}"; do
-  [[ ! -f "$FLUTTER_MODELS_DIR/$_d/model.bin" ]] && _MISSING_DIRS+=("$_d")
+  if [[ -f "$FLUTTER_MODELS_DIR/$_d/model.bin" ]]; then
+    _PRESENT_DIRS+=("$_d")
+  else
+    _MISSING_DIRS+=("$_d")
+  fi
 done
 _MISSING_COUNT=${#_MISSING_DIRS[@]}
-_PRESENT_COUNT=$(( ${#_ALL_MODEL_DIRS[@]} - _MISSING_COUNT ))
+_PRESENT_COUNT=${#_PRESENT_DIRS[@]}
 
 # "all" = 24 modèles | "small" = 4 modèles | "KEY1,KEY2,..." = sélection perso
 _MODELS_SELECTION="all"
@@ -72,6 +77,8 @@ if [[ -t 0 ]]; then
   # ── Bilan ──────────────────────────────────────────────────────────────────
   if [[ $_MISSING_COUNT -eq 0 ]]; then
     echo -e "${GREEN}✅ ${#_ALL_MODEL_DIRS[@]}/${#_ALL_MODEL_DIRS[@]} modèles présents${NC}"
+  elif [[ $_PRESENT_COUNT -eq 0 ]]; then
+    echo -e "${YELLOW}   Aucun modèle présent${NC}"
   else
     echo -e "${YELLOW}   $_PRESENT_COUNT/${#_ALL_MODEL_DIRS[@]} modèles présents${NC}"
     echo -e "${YELLOW}   Manquants ($_MISSING_COUNT) : ${_MISSING_DIRS[*]}${NC}"
@@ -79,109 +86,135 @@ if [[ -t 0 ]]; then
   echo ""
 
   # ── Menu ───────────────────────────────────────────────────────────────────
-  echo -e "${BLUE}   Modèles à embarquer dans ce build :${NC}"
-  if [[ $_MISSING_COUNT -gt 0 ]]; then
-    echo -e "   ${BLUE}[Entrée]${NC} Télécharger les $_MISSING_COUNT manquants"
+  # Résumé des modèles présents pour l'option [Entrée]
+  if [[ $_PRESENT_COUNT -eq 0 ]]; then
+    _ENTREE_DESC="Garder en l'état — aucun modèle (OCR uniquement)"
+  elif [[ $_MISSING_COUNT -eq 0 ]]; then
+    _ENTREE_DESC="Garder en l'état — ${#_ALL_MODEL_DIRS[@]}/${#_ALL_MODEL_DIRS[@]} présents ✅"
   else
-    echo -e "   ${BLUE}[Entrée]${NC} Garder en l'état (${#_ALL_MODEL_DIRS[@]}/${#_ALL_MODEL_DIRS[@]})"
+    # Affiche les noms présents (max 6, puis "…")
+    _prev=("${_PRESENT_DIRS[@]:0:6}")
+    _prev_str="${_prev[*]}"
+    [[ $_PRESENT_COUNT -gt 6 ]] && _prev_str+=" …"
+    _ENTREE_DESC="Garder en l'état — $_PRESENT_COUNT/${#_ALL_MODEL_DIRS[@]} présents : $_prev_str"
   fi
-  echo -e "   ${BLUE}[1]${NC} Tout télécharger — 24 modèles, 16 langues    ~1-3 h"
-  echo -e "   ${BLUE}[2]${NC} Rapide — 4 modèles (ja / fr+es+it+pt / de)   ~15-30 min"
-  echo -e "   ${BLUE}[3]${NC} Choisir par langue"
-  echo -e "   ${BLUE}[i]${NC} Ignorer — build sans traduction (OCR uniquement)"
+
+  echo -e "${BLUE}   Modèles à embarquer dans ce build :${NC}"
+  echo -e "   ${BLUE}[Entrée]${NC} $_ENTREE_DESC"
+  if [[ $_MISSING_COUNT -gt 0 ]]; then
+    echo -e "   ${BLUE}[1]${NC} Télécharger les $_MISSING_COUNT manquants"
+    echo -e "   ${BLUE}[2]${NC} Tout télécharger — 24 modèles, 16 langues    ~1-3 h"
+    echo -e "   ${BLUE}[3]${NC} Rapide — 4 modèles (ja / fr+es+it+pt / de)   ~15-30 min"
+    echo -e "   ${BLUE}[4]${NC} Choisir par langue"
+  else
+    echo -e "   ${BLUE}[1]${NC} Tout télécharger — 24 modèles, 16 langues    ~1-3 h"
+    echo -e "   ${BLUE}[2]${NC} Rapide — 4 modèles (ja / fr+es+it+pt / de)   ~15-30 min"
+    echo -e "   ${BLUE}[3]${NC} Choisir par langue"
+  fi
+  echo -e "   ${BLUE}[pg]${NC} Purger — retire tous les modèles, build OCR uniquement"
   echo ""
   read -r -p "   > " _MC
 
-  case "${_MC,,}" in
-    "")
-      if [[ $_MISSING_COUNT -gt 0 ]]; then
-        echo -e "${GREEN}   → Téléchargement des $_MISSING_COUNT modèles manquants${NC}"
-        _MODELS_SELECTION="$(IFS=','; echo "${_MISSING_DIRS[*]}")"
-      else
-        echo -e "${GREEN}   → Modèles en place — aucun téléchargement${NC}"
-        _SKIP_MODELS=true
-      fi
-      ;;
-    1)
-      echo -e "${GREEN}   → Tous les modèles (24)${NC}"
-      ;;
-    2)
-      echo -e "${GREEN}   → Sélection rapide (4 modèles)${NC}"
-      _MODELS_SELECTION="small"
-      ;;
-    3)
-      # Noms affichés et clés de modèles correspondantes (parallèles)
-      # en-mul couvre ja (>>jpn<<) et th (>>tha<<) — dédupliqué automatiquement
-      _LANG_NAMES=(
-        "Japonais              (ja-en, en-mul)"
-        "Chinois               (zh-en, en-zh)"
-        "Coréen                (ko-en, tc-big-en-ko)"
-        "Russe                 (ru-en, en-ru)"
-        "Arabe                 (ar-en, en-ar, tc-big-en-ar)"
-        "Hindi                 (hi-en, en-hi)"
-        "Thaï                  (th-en, en-mul)"
-        "Vietnamien            (vi-en, en-vi)"
-        "Roman. fr/es/it/pt    (ROMANCE-en, en-ROMANCE)"
-        "Allemand              (de-en, en-de)"
-        "Néerlandais           (nl-en, en-nl)"
-        "Polonais              (pl-en, en-sla)"
-      )
-      _LANG_KEYS=(
-        "ja-en,en-mul"
-        "zh-en,en-zh"
-        "ko-en,tc-big-en-ko"
-        "ru-en,en-ru"
-        "ar-en,en-ar,tc-big-en-ar"
-        "hi-en,en-hi"
-        "th-en,en-mul"
-        "vi-en,en-vi"
-        "ROMANCE-en,en-ROMANCE"
-        "de-en,en-de"
-        "nl-en,en-nl"
-        "pl-en,en-sla"
-      )
-      echo ""
-      echo -e "${BLUE}   Langues disponibles (toutes pivotent via l'anglais) :${NC}"
-      for i in "${!_LANG_NAMES[@]}"; do
-        printf "   %2d) %s\n" $((i+1)) "${_LANG_NAMES[$i]}"
-      done
-      echo ""
-      read -r -p "   Numéros séparés par espaces (ex: 1 4 9) : " _NUMS
+  # Décalage des options selon la présence de modèles manquants :
+  # - Si manquants : [1]=manquants [2]=tous [3]=rapide [4]=langues
+  # - Si complet   :               [1]=tous [2]=rapide [3]=langues
+  _OPT_MISSING=0; _OPT_ALL=1; _OPT_SMALL=2; _OPT_LANG=3
+  if [[ $_MISSING_COUNT -gt 0 ]]; then
+    _OPT_MISSING=1; _OPT_ALL=2; _OPT_SMALL=3; _OPT_LANG=4
+  fi
 
-      # Construction de la liste dédupliquée (en-mul partagé entre ja et th)
-      declare -A _seen=()
-      _sel=""
-      for num in $_NUMS; do
-        if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#_LANG_NAMES[@]} )); then
-          IFS=',' read -ra _ms <<< "${_LANG_KEYS[$((num-1))]}"
-          for m in "${_ms[@]}"; do
-            if [[ -z "${_seen[$m]+x}" ]]; then
-              _seen[$m]=1
-              _sel="${_sel:+$_sel,}$m"
-            fi
-          done
-        fi
-      done
-      unset _seen
+  # Sous-menu "choisir par langue" — partagé entre les deux branches
+  _run_lang_menu() {
+    # en-mul couvre ja (>>jpn<<) et th (>>tha<<) — dédupliqué automatiquement
+    local _LANG_NAMES=(
+      "Japonais              (ja-en, en-mul)"
+      "Chinois               (zh-en, en-zh)"
+      "Coréen                (ko-en, tc-big-en-ko)"
+      "Russe                 (ru-en, en-ru)"
+      "Arabe                 (ar-en, en-ar, tc-big-en-ar)"
+      "Hindi                 (hi-en, en-hi)"
+      "Thaï                  (th-en, en-mul)"
+      "Vietnamien            (vi-en, en-vi)"
+      "Roman. fr/es/it/pt    (ROMANCE-en, en-ROMANCE)"
+      "Allemand              (de-en, en-de)"
+      "Néerlandais           (nl-en, en-nl)"
+      "Polonais              (pl-en, en-sla)"
+    )
+    local _LANG_KEYS=(
+      "ja-en,en-mul"
+      "zh-en,en-zh"
+      "ko-en,tc-big-en-ko"
+      "ru-en,en-ru"
+      "ar-en,en-ar,tc-big-en-ar"
+      "hi-en,en-hi"
+      "th-en,en-mul"
+      "vi-en,en-vi"
+      "ROMANCE-en,en-ROMANCE"
+      "de-en,en-de"
+      "nl-en,en-nl"
+      "pl-en,en-sla"
+    )
+    echo ""
+    echo -e "${BLUE}   Langues disponibles (toutes pivotent via l'anglais) :${NC}"
+    for i in "${!_LANG_NAMES[@]}"; do
+      printf "   %2d) %s\n" $((i+1)) "${_LANG_NAMES[$i]}"
+    done
+    echo ""
+    read -r -p "   Numéros séparés par espaces (ex: 1 4 9) : " _NUMS
 
-      if [[ -z "$_sel" ]]; then
-        echo -e "${YELLOW}   Aucune sélection valide — build sans traduction${NC}"
-        _SKIP_MODELS=true
-      else
-        echo -e "${GREEN}   → $_sel${NC}"
-        _MODELS_SELECTION="$_sel"
+    declare -A _seen=()
+    _sel=""
+    for num in $_NUMS; do
+      if [[ "$num" =~ ^[0-9]+$ ]] && (( num >= 1 && num <= ${#_LANG_NAMES[@]} )); then
+        IFS=',' read -ra _ms <<< "${_LANG_KEYS[$((num-1))]}"
+        for m in "${_ms[@]}"; do
+          if [[ -z "${_seen[$m]+x}" ]]; then
+            _seen[$m]=1
+            _sel="${_sel:+$_sel,}$m"
+          fi
+        done
       fi
-      ;;
-    i*)
-      echo -e "${YELLOW}   Modèles ignorés — build sans traduction (OCR OK)${NC}"
+    done
+    unset _seen
+    echo "$_sel"
+  }
+
+  _MC_N="${_MC,,}"
+  if [[ "$_MC_N" == "" || "$_MC_N" == *[^0-9i]* && "$_MC_N" != i* ]]; then
+    _MC_N="${_MC_N:-0}"
+  fi
+
+  case "$_MC_N" in
+    ""|0)
+      echo -e "${GREEN}   → Modèles en l'état ($_PRESENT_COUNT/${#_ALL_MODEL_DIRS[@]})${NC}"
       _SKIP_MODELS=true
       ;;
     *)
-      if [[ $_MISSING_COUNT -gt 0 ]]; then
+      if [[ "$_MC_N" == pg* ]]; then
+        echo -e "${YELLOW}   Purge des modèles en cours…${NC}"
+        find "$FLUTTER_MODELS_DIR" -mindepth 2 -maxdepth 2 -type f ! -name '.gitkeep' -delete
+        _PURGED=$(( ${#_ALL_MODEL_DIRS[@]} - _MISSING_COUNT ))
+        echo -e "${GREEN}   ✓ $_PURGED modèle(s) purgé(s) — build OCR uniquement${NC}"
+        _SKIP_MODELS=true
+      elif [[ "$_MC_N" -eq "$_OPT_MISSING" && $_MISSING_COUNT -gt 0 ]]; then
         echo -e "${GREEN}   → Téléchargement des $_MISSING_COUNT modèles manquants${NC}"
         _MODELS_SELECTION="$(IFS=','; echo "${_MISSING_DIRS[*]}")"
+      elif [[ "$_MC_N" -eq "$_OPT_ALL" ]]; then
+        echo -e "${GREEN}   → Tous les modèles (24)${NC}"
+      elif [[ "$_MC_N" -eq "$_OPT_SMALL" ]]; then
+        echo -e "${GREEN}   → Sélection rapide (4 modèles)${NC}"
+        _MODELS_SELECTION="small"
+      elif [[ "$_MC_N" -eq "$_OPT_LANG" ]]; then
+        _sel="$(_run_lang_menu)"
+        if [[ -z "$_sel" ]]; then
+          echo -e "${YELLOW}   Aucune sélection valide — modèles en l'état${NC}"
+          _SKIP_MODELS=true
+        else
+          echo -e "${GREEN}   → $_sel${NC}"
+          _MODELS_SELECTION="$_sel"
+        fi
       else
-        echo -e "${GREEN}   → Modèles en place — aucun téléchargement${NC}"
+        echo -e "${GREEN}   → Modèles en l'état ($_PRESENT_COUNT/${#_ALL_MODEL_DIRS[@]})${NC}"
         _SKIP_MODELS=true
       fi
       ;;

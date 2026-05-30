@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -8,6 +7,7 @@ import 'package:path/path.dart' as p;
 import '../models/language.dart';
 import '../models/language_detection.dart';
 import '../models/processing.dart';
+import '../services/model_download_service.dart';
 import '../services/pdf_service.dart';
 import '../services/translation_service.dart';
 import '../theme/app_theme.dart';
@@ -695,108 +695,73 @@ class _ModelDownloadSheet extends StatefulWidget {
 
 class _ModelDownloadSheetState extends State<_ModelDownloadSheet> {
   final _tokenController = TextEditingController();
-  final _outputScroll = ScrollController();
+
   bool _downloading = false;
   bool _done = false;
-  String _output = '';
+  String? _error;
+
+  // Progression en cours
+  int _currentModelIdx = -1;
+  String _currentFile = '';
+  int _fileReceived = 0;
+  int _fileTotal = -1;
+  final Set<String> _completedModels = {};
 
   @override
   void dispose() {
     _tokenController.dispose();
-    _outputScroll.dispose();
     super.dispose();
   }
 
-  // Remonte l'arborescence depuis l'exécutable pour trouver le script source
-  static String? _findPrepareScript() {
-    var dir = p.dirname(Platform.resolvedExecutable);
-    for (int i = 0; i < 8; i++) {
-      final candidate = p.join(dir, 'scripts', 'prepare_translation_models.sh');
-      if (File(candidate).existsSync()) return candidate;
-      final parent = p.dirname(dir);
-      if (parent == dir) break;
-      dir = parent;
-    }
-    return null;
-  }
-
   Future<void> _runDownload() async {
-    setState(() { _downloading = true; _done = false; _output = ''; });
-
-    final script = _findPrepareScript();
     final outputDir = TranslationService.userModelsDir();
-
-    if (script == null) {
-      // Mode snap ou dossier source inaccessible : afficher la commande à exécuter
-      final token = _tokenController.text.trim();
-      final tokenArg = token.isNotEmpty ? '\n    --hf-token $token \\' : '';
-      setState(() {
-        _output = '⚠  Script de conversion introuvable (mode snap).\n\n'
-            'Exécutez depuis le répertoire source du projet :\n\n'
-            '  ./scripts/prepare_translation_models.sh \\\n'
-            '    --models ${widget.missingModels.join(",")} \\$tokenArg\n'
-            '    flutter_app/assets/translation_models/\n\n'
-            'Puis relancez l\'application.';
-        _downloading = false;
-      });
-      return;
-    }
-
     if (outputDir == null) {
-      setState(() {
-        _output = '⚠  Impossible de déterminer le répertoire utilisateur.';
-        _downloading = false;
-      });
+      setState(() => _error = 'Impossible de déterminer le répertoire utilisateur.');
       return;
     }
 
-    await Directory(outputDir).create(recursive: true);
+    setState(() {
+      _downloading = true;
+      _done = false;
+      _error = null;
+      _currentModelIdx = 0;
+      _completedModels.clear();
+    });
 
     final token = _tokenController.text.trim();
-    final args = [
-      script,
-      '--models', widget.missingModels.join(','),
-      if (token.isNotEmpty) ...['--hf-token', token],
-      outputDir,
-    ];
-
-    setState(() => _output = '→ Démarrage de la conversion...\n');
+    final models = widget.missingModels.toList();
 
     try {
-      final process = await Process.start('bash', args);
+      for (int i = 0; i < models.length; i++) {
+        final modelKey = models[i];
+        if (mounted) setState(() { _currentModelIdx = i; _currentFile = ''; });
 
-      process.stdout.transform(utf8.decoder).forEach((chunk) {
-        if (mounted) setState(() { _output += chunk; _scrollToBottom(); });
-      });
-      process.stderr.transform(utf8.decoder).forEach((chunk) {
-        if (mounted) setState(() { _output += chunk; _scrollToBottom(); });
-      });
+        await ModelDownloadService.downloadModel(
+          modelKey,
+          targetDir: p.join(outputDir, modelKey),
+          hfToken: token.isNotEmpty ? token : null,
+          onProgress: (filename, received, total) {
+            if (!mounted) return;
+            setState(() {
+              _currentFile = filename;
+              _fileReceived = received;
+              _fileTotal = total;
+            });
+          },
+        );
 
-      final exitCode = await process.exitCode;
+        if (mounted) setState(() => _completedModels.add(modelKey));
+      }
+
       if (mounted) {
-        setState(() {
-          _downloading = false;
-          _done = exitCode == 0;
-          _output += exitCode == 0
-              ? '\n✅ Téléchargement terminé.'
-              : '\n❌ Erreur (code $exitCode).';
-          _scrollToBottom();
-        });
-        if (exitCode == 0) widget.onDownloadComplete();
+        setState(() { _downloading = false; _done = true; _currentModelIdx = -1; });
+        widget.onDownloadComplete();
       }
     } catch (e) {
       if (mounted) {
-        setState(() { _output += '\n❌ Erreur : $e'; _downloading = false; });
+        setState(() { _downloading = false; _error = e.toString(); _currentModelIdx = -1; });
       }
     }
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_outputScroll.hasClients) {
-        _outputScroll.jumpTo(_outputScroll.position.maxScrollExtent);
-      }
-    });
   }
 
   @override
@@ -843,89 +808,99 @@ class _ModelDownloadSheetState extends State<_ModelDownloadSheet> {
               controller: widget.scrollController,
               padding: const EdgeInsets.fromLTRB(20, 0, 20, 20),
               children: [
-                // Liste des modèles requis
-                Text('Modèles requis',
-                    style: Theme.of(context).textTheme.labelLarge),
-                const SizedBox(height: 6),
-                ...widget.missingModels.map((m) => Padding(
-                      padding: const EdgeInsets.only(bottom: 2),
-                      child: Row(children: [
-                        const Icon(Icons.chevron_right, size: 16, color: AppTheme.primaryColor),
-                        const SizedBox(width: 4),
-                        Text(m, style: const TextStyle(fontFamily: 'monospace')),
-                      ]),
-                    )),
 
-                const SizedBox(height: 20),
-
-                // Token HuggingFace
-                Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-                  Text('Token HuggingFace',
-                      style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(width: 6),
-                  Tooltip(
-                    triggerMode: TooltipTriggerMode.tap,
-                    showDuration: const Duration(seconds: 8),
-                    message:
-                        'Optionnel, mais recommandé pour éviter le rate-limiting\n'
-                        'lors du téléchargement de plusieurs modèles.\n\n'
-                        'Pour créer un token gratuit :\n'
-                        '  1. Allez sur huggingface.co/settings/tokens\n'
-                        '  2. Cliquez "New token" → type "Read"\n'
-                        '  3. Copiez le token (commence par hf_...)',
-                    child: Icon(Icons.help_outline,
-                        size: 16, color: Colors.grey.shade500),
-                  ),
-                ]),
-                const SizedBox(height: 6),
-                TextField(
-                  controller: _tokenController,
-                  enabled: !_downloading,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    hintText: 'hf_... (optionnel)',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                    contentPadding:
-                        EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    prefixIcon: Icon(Icons.key, size: 18),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'huggingface.co/settings/tokens  →  "New token" → Read',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: AppTheme.textSecondary,
-                      ),
-                ),
-
-                // Zone de sortie (visible après démarrage)
-                if (_output.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  Text('Sortie', style: Theme.of(context).textTheme.labelLarge),
-                  const SizedBox(height: 6),
-                  Container(
-                    height: 180,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade900,
-                      borderRadius: BorderRadius.circular(6),
+                // ── Token HuggingFace (masqué une fois le téléchargement terminé) ──
+                if (!_done) ...[
+                  Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                    Text('Token HuggingFace',
+                        style: Theme.of(context).textTheme.labelLarge),
+                    const SizedBox(width: 6),
+                    Tooltip(
+                      triggerMode: TooltipTriggerMode.tap,
+                      showDuration: const Duration(seconds: 8),
+                      message:
+                          'Optionnel, mais recommandé pour éviter le rate-limiting.\n\n'
+                          'Pour créer un token gratuit :\n'
+                          '  1. huggingface.co/settings/tokens\n'
+                          '  2. "New token" → type "Read"\n'
+                          '  3. Copiez le token (commence par hf_...)',
+                      child: Icon(Icons.help_outline,
+                          size: 16, color: Colors.grey.shade500),
                     ),
-                    child: Scrollbar(
-                      controller: _outputScroll,
-                      child: SingleChildScrollView(
-                        controller: _outputScroll,
-                        padding: const EdgeInsets.all(10),
-                        child: SelectableText(
-                          _output,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 11,
-                            color: Colors.white70,
+                  ]),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: _tokenController,
+                    enabled: !_downloading,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      hintText: 'hf_... (optionnel)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      prefixIcon: Icon(Icons.key, size: 18),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'huggingface.co/settings/tokens  →  "New token" → Read',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppTheme.textSecondary,
+                        ),
+                  ),
+                  const SizedBox(height: 20),
+                ],
+
+                // ── Liste des modèles avec statut ─────────────────────────────
+                Text(
+                  'Modèles (${widget.missingModels.length})',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+                const SizedBox(height: 8),
+                ...widget.missingModels.toList().asMap().entries.map((entry) {
+                  final idx = entry.key;
+                  final modelKey = entry.value;
+                  return _buildModelTile(context, idx, modelKey);
+                }),
+
+                // ── Message d'erreur ──────────────────────────────────────────
+                if (_error != null) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.red.shade50,
+                      border: Border.all(color: Colors.red.shade200),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(Icons.error_outline, color: Colors.red.shade700, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _error!,
+                            style: TextStyle(fontSize: 12, color: Colors.red.shade800),
                           ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
+                ],
+
+                // ── Succès ────────────────────────────────────────────────────
+                if (_done) ...[
+                  const SizedBox(height: 16),
+                  Row(children: [
+                    const Icon(Icons.check_circle, color: Colors.green, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${_completedModels.length} modèle(s) téléchargé(s) avec succès.',
+                      style: const TextStyle(color: Colors.green),
+                    ),
+                  ]),
                 ],
               ],
             ),
@@ -933,7 +908,7 @@ class _ModelDownloadSheetState extends State<_ModelDownloadSheet> {
 
           const Divider(height: 1),
 
-          // Boutons
+          // ── Boutons ───────────────────────────────────────────────────────
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
             child: Row(children: [
@@ -942,12 +917,13 @@ class _ModelDownloadSheetState extends State<_ModelDownloadSheet> {
                 child: Text(_done ? 'Fermer' : 'Annuler'),
               ),
               const Spacer(),
-              if (_downloading)
+              if (_downloading) ...[
                 const SizedBox(
                   width: 20, height: 20,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
-              if (_downloading) const SizedBox(width: 12),
+                const SizedBox(width: 12),
+              ],
               FilledButton.icon(
                 onPressed: _downloading || _done ? null : _runDownload,
                 icon: const Icon(Icons.download, size: 18),
@@ -956,6 +932,90 @@ class _ModelDownloadSheetState extends State<_ModelDownloadSheet> {
             ]),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildModelTile(BuildContext context, int idx, String modelKey) {
+    final isActive = _downloading && _currentModelIdx == idx;
+    final isDone = _completedModels.contains(modelKey);
+    final isPending = !isActive && !isDone;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: isActive
+              ? AppTheme.primaryColor.withValues(alpha: 0.06)
+              : isDone
+                  ? Colors.green.withValues(alpha: 0.06)
+                  : Colors.grey.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isActive
+                ? AppTheme.primaryColor.withValues(alpha: 0.3)
+                : isDone
+                    ? Colors.green.withValues(alpha: 0.3)
+                    : Colors.grey.withValues(alpha: 0.2),
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              SizedBox(
+                width: 20, height: 20,
+                child: isActive
+                    ? const CircularProgressIndicator(strokeWidth: 2)
+                    : Icon(
+                        isDone ? Icons.check_circle : Icons.cloud_download_outlined,
+                        size: 18,
+                        color: isDone ? Colors.green : Colors.grey.shade400,
+                      ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                modelKey,
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                  color: isPending ? Colors.grey.shade500 : null,
+                ),
+              ),
+              if (isDone) ...[
+                const Spacer(),
+                Text(
+                  'Téléchargé',
+                  style: TextStyle(fontSize: 11, color: Colors.green.shade700),
+                ),
+              ],
+            ]),
+
+            // Progression du fichier en cours
+            if (isActive && _currentFile.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(
+                _currentFile,
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              ),
+              const SizedBox(height: 4),
+              LinearProgressIndicator(
+                value: _fileTotal > 0 ? _fileReceived / _fileTotal : null,
+                minHeight: 3,
+                backgroundColor: Colors.grey.shade200,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _fileTotal > 0
+                    ? '${(_fileReceived / 1048576).toStringAsFixed(1)} / '
+                      '${(_fileTotal / 1048576).toStringAsFixed(1)} Mo'
+                    : '${(_fileReceived / 1048576).toStringAsFixed(1)} Mo',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
