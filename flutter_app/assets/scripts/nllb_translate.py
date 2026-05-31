@@ -21,9 +21,11 @@ os.environ.setdefault("MKL_NUM_THREADS",      _N_THREADS)
 os.environ.setdefault("OPENBLAS_NUM_THREADS", _N_THREADS)
 
 import json
+import gc
 
 # Nombre de lignes par appel translate_batch. Réduit le gel en produisant des
 # résultats intermédiaires et permet de rapporter la progression à Dart via stderr.
+# Valeur basse = mémoire de pointe réduite + progression plus fréquente.
 _CHUNK_SIZE = 16
 
 
@@ -139,9 +141,18 @@ def main():
                 output_tokens = result.hypotheses[0][1:]
                 translated[(ti, li)] = sp.decode(output_tokens)
 
+            # Libère les états de décodage beam search du chunk (StorageView C++)
+            # avant d'entamer le suivant — évite l'accumulation mémoire.
+            del results, tokens_batch, target_prefix
+            gc.collect()
+
         total_dt = time.monotonic() - t_batch_start
         _log(f"translate_batch terminé — {total_dt:.1f}s pour {total_lines} lignes "
              f"({total_dt/total_lines:.2f}s/seg moyen)")
+
+    # `flat` contient tous les tokens d'entrée — libère avant reconstruction.
+    del flat
+    gc.collect()
 
     # ── Reconstruction ────────────────────────────────────────────────────────
     output = []
