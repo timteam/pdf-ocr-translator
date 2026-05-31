@@ -100,21 +100,14 @@ output/
 translations_cache/
 models/
 
-# Modèles de traduction (taille importante - ne pas commiter)
+# Modèles de traduction (fichiers générés — ne pas commiter)
+# Les règles de contenu sont dans flutter_app/assets/translation_models/.gitignore
 translation_models/
-flutter_app/assets/translation_models/
 snap/translation_models/
-*.onnx
+!flutter_app/assets/translation_models/
 *.bin
 *.pt
 *.safetensors
-*.vocab
-*.json
-
-# Exceptions : répertoires de modèles vides (placeholders pour Flutter/git)
-!flutter_app/assets/translation_models/
-!flutter_app/assets/translation_models/*/
-!flutter_app/assets/translation_models/*/.gitkeep
 
 # Exception : modèles ONNX statiques bundlés dans le snap
 !flutter_app/assets/models/
