@@ -1,22 +1,20 @@
 #!/bin/bash
 #
-# Télécharge et convertit les modèles Helsinki-NLP opus-mt en CTranslate2 INT8.
+# Télécharge et convertit facebook/nllb-200-distilled-600M en CTranslate2 INT8.
 #
 # Usage :
 #   ./scripts/prepare_translation_models.sh [OPTIONS]
 #
 # OPTIONS
-#   -h, --help                 Cette aide
-#   -l, --list                 Liste les modèles sans télécharger
-#   -s, --small                4 modèles seulement (test rapide)
-#   --clean                    Reconvertit même si model.bin existe déjà
-#   --models KEY[,KEY...]      Sélectionner des modèles spécifiques
-#   --hf-token TOKEN           Token HuggingFace (optionnel mais recommandé)
+#   -h, --help          Cette aide
+#   --clean             Reconvertit même si model.bin existe déjà
+#   --hf-token TOKEN    Token HuggingFace (recommandé pour éviter le rate-limiting)
 #
 # WORKFLOW
-#   1. Installe ctranslate2 + torch + transformers dans .ct2_cache/pkgs/
-#   2. Pour chaque modèle : télécharge via snapshot_download (hf_transfer),
-#      convertit en INT8 via convert_model.py, place dans assets/translation_models/
+#   1. Installe ctranslate2, transformers, sentencepiece dans .ct2_cache/pkgs/
+#   2. Télécharge facebook/nllb-200-distilled-600M via snapshot_download
+#   3. Convertit en INT8 via convert_model.py
+#   4. Place le résultat dans assets/translation_models/nllb-200-distilled-600M/
 #
 # DEST_DIR : flutter_app/assets/translation_models/ (non modifiable, fixé par pubspec)
 
@@ -31,80 +29,34 @@ PKGS_HASH_FILE="$CACHE_BASE/pkgs.hash"
 HF_TOKEN_CACHE="$SCRIPT_DIR/../.hf_token"
 PIP_PYZ=""
 
-# ─── Graphe de modèles ────────────────────────────────────────────────────────
-declare -A MODEL_HF=(
-  ["ja-en"]="Helsinki-NLP/opus-mt-ja-en"
-  ["zh-en"]="Helsinki-NLP/opus-mt-zh-en"
-  ["ko-en"]="Helsinki-NLP/opus-mt-ko-en"
-  ["ru-en"]="Helsinki-NLP/opus-mt-ru-en"
-  ["ar-en"]="Helsinki-NLP/opus-mt-ar-en"
-  ["hi-en"]="Helsinki-NLP/opus-mt-hi-en"
-  ["th-en"]="Helsinki-NLP/opus-mt-th-en"
-  ["vi-en"]="Helsinki-NLP/opus-mt-vi-en"
-  ["de-en"]="Helsinki-NLP/opus-mt-de-en"
-  ["nl-en"]="Helsinki-NLP/opus-mt-nl-en"
-  ["pl-en"]="Helsinki-NLP/opus-mt-pl-en"
-  ["ROMANCE-en"]="Helsinki-NLP/opus-mt-ROMANCE-en"
-  ["en-ROMANCE"]="Helsinki-NLP/opus-mt-en-ROMANCE"
-  ["en-de"]="Helsinki-NLP/opus-mt-en-de"
-  ["en-nl"]="Helsinki-NLP/opus-mt-en-nl"
-  ["en-ru"]="Helsinki-NLP/opus-mt-en-ru"
-  ["en-hi"]="Helsinki-NLP/opus-mt-en-hi"
-  ["en-zh"]="Helsinki-NLP/opus-mt-en-zh"
-  ["en-ar"]="Helsinki-NLP/opus-mt-en-ar"
-  ["en-vi"]="Helsinki-NLP/opus-mt-en-vi"
-  ["en-mul"]="Helsinki-NLP/opus-mt-en-mul"
-  ["en-sla"]="Helsinki-NLP/opus-mt-en-sla"
-  ["tc-big-en-ar"]="Helsinki-NLP/opus-mt-tc-big-en-ar"
-  ["tc-big-en-ko"]="Helsinki-NLP/opus-mt-tc-big-en-ko"
-)
-
-ALL_MODELS=(
-  "ja-en" "zh-en" "ko-en" "ru-en" "ar-en" "hi-en" "th-en" "vi-en"
-  "de-en" "nl-en" "pl-en" "ROMANCE-en"
-  "en-ROMANCE" "en-de" "en-nl" "en-ru" "en-hi" "en-zh" "en-ar"
-  "en-vi" "en-mul" "en-sla" "tc-big-en-ar" "tc-big-en-ko"
-)
-
-SMALL_MODELS=("ja-en" "ROMANCE-en" "en-ROMANCE" "en-de")
+MODEL_KEY="nllb-200-distilled-600M"
+MODEL_HF="facebook/nllb-200-distilled-600M"
 
 # ─── Aide ─────────────────────────────────────────────────────────────────────
 usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Convertit les modèles Helsinki-NLP opus-mt en CTranslate2 INT8.
+Télécharge et convertit NLLB-200-distilled-600M en CTranslate2 INT8.
 
 OPTIONS
-  -h, --help             Cette aide
-  -l, --list             Liste les modèles sans télécharger
-  -s, --small            4 modèles seulement (ja-en, ROMANCE-en, en-ROMANCE, en-de)
-  --clean                Reconvertit même si model.bin existe déjà
-  --models KEY[,KEY...]  Modèles spécifiques (ex: --models ja-en,en-ROMANCE)
-  --hf-token TOKEN       Token HuggingFace (évite le rate-limiting)
+  -h, --help          Cette aide
+  --clean             Reconvertit même si model.bin existe déjà
+  --hf-token TOKEN    Token HuggingFace (évite le rate-limiting)
+
+MODÈLE
+  Source  : $MODEL_HF
+  Sortie  : $DEST_DIR/$MODEL_KEY/
 
 TOKEN HUGGINGFACE
   Priorité : --hf-token > .hf_token > \$HF_TOKEN > huggingface-cli login
   Créer un token Read sur https://huggingface.co/settings/tokens
 
 EXEMPLES
-  $0                                  # Tout convertir
-  $0 --small                          # Test rapide (4 modèles)
-  $0 --models ja-en,en-ROMANCE        # Modèles spécifiques
-  $0 --clean --models en-de           # Forcer la reconversion
+  $0                              # Téléchargement + conversion
+  $0 --clean                      # Forcer la reconversion
+  $0 --hf-token hf_xxxx           # Avec token HF
 EOF
-}
-
-display_model_list() {
-  printf "  %-22s %s\n" "CLÉ" "REPO HUGGINGFACE"
-  printf "  %-22s %s\n" "---" "---"
-  for key in "${ALL_MODELS[@]}"; do
-    local bin="$DEST_DIR/$key/model.bin"
-    local mark="  "; [[ -f "$bin" ]] && mark="✓ "
-    printf "  %s%-20s %s\n" "$mark" "$key" "${MODEL_HF[$key]}"
-  done
-  echo ""
-  echo "  ✓ = déjà converti   Total : ${#MODEL_HF[@]} modèles"
 }
 
 # ─── Packages de conversion ───────────────────────────────────────────────────
@@ -205,18 +157,16 @@ cleanup_packages() {
 }
 _on_interrupt() {
   echo ""; echo "⚠  Interruption — arrêt."
-  echo "   Relancez pour reprendre depuis le dernier modèle non converti."
+  echo "   Relancez pour reprendre (model.bin absent = reconversion)."
   exit 130
 }
 trap cleanup_packages EXIT
 trap _on_interrupt INT TERM
 
-# ─── Téléchargement d'un modèle ──────────────────────────────────────────────
-# Utilise snapshot_download avec local_dir (pas de cache HF intermédiaire)
-# et hf_transfer (backend Rust) pour les transferts larges fichiers.
+# ─── Téléchargement du modèle ─────────────────────────────────────────────────
 _download_model() {
   local hf_id="$1" dest="$2"
-  echo "  Téléchargement $hf_id…"
+  echo "  Téléchargement $hf_id (~1.2 GB)…"
   _HF_ID="$hf_id" _DEST="$dest" \
   PYTHONPATH="$PKGS_DIR" HF_XET_HIGH_PERFORMANCE=1 \
   python3 - <<'PYEOF'
@@ -227,51 +177,25 @@ snapshot_download(
     local_dir=os.environ["_DEST"],
     repo_type="model",
     token=os.environ.get("HF_TOKEN") or None,
-    ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*", "rust_model*"],
+    ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*", "rust_model*", "*.ot"],
 )
 PYEOF
 }
 
 # ─── Arguments ────────────────────────────────────────────────────────────────
 CLEAN=false
-LIST_ONLY=false
-SMALL_MODE=false
-MODELS_FILTER=""
 HF_TOKEN_ARG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)   usage; exit 0 ;;
-    -l|--list)   LIST_ONLY=true; shift ;;
-    -s|--small)  SMALL_MODE=true; shift ;;
     --clean)     CLEAN=true; shift ;;
-    --models)
-      [[ -z "${2:-}" || "${2:-}" == --* ]] && { echo "❌ --models requiert une liste de clés"; exit 1; }
-      MODELS_FILTER="$2"; shift 2 ;;
     --hf-token)
       [[ -z "${2:-}" ]] && { echo "❌ --hf-token requiert un TOKEN"; exit 1; }
       HF_TOKEN_ARG="$2"; shift 2 ;;
     *) echo "❌ Option inconnue : $1"; usage; exit 1 ;;
   esac
 done
-
-if [[ "$LIST_ONLY" == true ]]; then display_model_list; exit 0; fi
-
-# ─── Sélection ────────────────────────────────────────────────────────────────
-if [[ "$SMALL_MODE" == true ]]; then
-  MODELS_TO_DO=("${SMALL_MODELS[@]}")
-  echo "Mode --small : ${MODELS_TO_DO[*]}"
-elif [[ -n "$MODELS_FILTER" ]]; then
-  IFS=',' read -ra MODELS_TO_DO <<< "$MODELS_FILTER"
-  for _k in "${MODELS_TO_DO[@]}"; do
-    [[ -z "${MODEL_HF[$_k]+x}" ]] && { echo "❌ Clé inconnue : '$_k'  (--list pour voir les clés)"; exit 1; }
-  done
-  echo "Sélection : ${MODELS_TO_DO[*]}"
-else
-  MODELS_TO_DO=("${ALL_MODELS[@]}")
-  echo "Conversion de ${#MODELS_TO_DO[@]} modèles → $DEST_DIR"
-fi
-echo ""
 
 # ─── Token HuggingFace ────────────────────────────────────────────────────────
 if [[ -n "$HF_TOKEN_ARG" ]]; then
@@ -286,70 +210,52 @@ elif [[ -f "$HOME/.cache/huggingface/token" ]]; then
   export HF_TOKEN="$(< "$HOME/.cache/huggingface/token")"
   echo "→ Token HF : ~/.cache/huggingface/token"
 else
-  echo "ℹ  Aucun token HF (recommandé pour 24 téléchargements : --hf-token hf_xxx)"
+  echo "ℹ  Aucun token HF (recommandé : --hf-token hf_xxx)"
 fi
+echo ""
+
+# ─── Vérification pré-existante ───────────────────────────────────────────────
+OUT_DIR="$DEST_DIR/$MODEL_KEY"
+
+if [[ "$CLEAN" == false && -f "$OUT_DIR/model.bin" ]]; then
+  size=$(du -sh "$OUT_DIR/model.bin" | cut -f1)
+  echo "✅ $MODEL_KEY déjà converti ($size) — rien à faire."
+  echo "   Utilisez --clean pour forcer la reconversion."
+  exit 0
+fi
+
+echo "Conversion de $MODEL_KEY"
+echo "  Source  : $MODEL_HF"
+echo "  Sortie  : $OUT_DIR"
 echo ""
 
 # ─── Packages ─────────────────────────────────────────────────────────────────
 setup_packages
 
-# ─── Boucle de conversion ────────────────────────────────────────────────────
-mkdir -p "$DEST_DIR"
-TOTAL=${#MODELS_TO_DO[@]}
-COUNT=0; DONE=0; FAILED=()
-
-for key in "${MODELS_TO_DO[@]}"; do
-  COUNT=$((COUNT + 1))
-  hf_id="${MODEL_HF[$key]}"
-  out_dir="$DEST_DIR/$key"
-
-  if [[ "$CLEAN" == false && -f "$out_dir/model.bin" ]]; then
-    DONE=$((DONE + 1))
-    echo "[$COUNT/$TOTAL] $key — déjà converti ✓"
-    continue
-  fi
-
-  echo ""; echo "[$COUNT/$TOTAL] $key ($hf_id)"
-
-  # Téléchargement
-  src_dir=$(mktemp -d)
-  if ! _download_model "$hf_id" "$src_dir"; then
-    echo "  ✗ $key — téléchargement échoué"
-    FAILED+=("$key")
-    rm -rf "$src_dir"
-    continue
-  fi
-
-  # Conversion
-  mkdir -p "$out_dir" && touch "$out_dir/.gitkeep"
-  convert_exit=0
-  PYTHONPATH="$PKGS_DIR" python3 "$SCRIPT_DIR/convert_model.py" "$src_dir" "$out_dir" \
-    || convert_exit=$?
-
+# ─── Téléchargement + Conversion ─────────────────────────────────────────────
+src_dir=$(mktemp -d)
+echo "[1/2] Téléchargement…"
+if ! _download_model "$MODEL_HF" "$src_dir"; then
+  echo "❌ Téléchargement échoué"
   rm -rf "$src_dir"
+  exit 1
+fi
 
-  if [[ $convert_exit -eq 130 || $convert_exit -eq 139 ]]; then
-    _on_interrupt
-  elif [[ $convert_exit -ne 0 ]]; then
-    echo "  ✗ $key — conversion échouée (code $convert_exit)"
-    FAILED+=("$key")
-    find "$out_dir" -type f ! -name '.gitkeep' -delete 2>/dev/null || true
-  else
-    DONE=$((DONE + 1))
-    echo "  [$DONE/$TOTAL] $key ✓"
-  fi
-done
+mkdir -p "$OUT_DIR" && touch "$OUT_DIR/.gitkeep"
+echo ""
+echo "[2/2] Conversion CTranslate2 INT8…"
+PYTHONPATH="$PKGS_DIR" python3 "$SCRIPT_DIR/convert_model.py" "$src_dir" "$OUT_DIR"
+
+rm -rf "$src_dir"
 
 # ─── Résumé ───────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════"
-echo "Terminé : $DONE/$TOTAL convertis"
-[[ -d "$DEST_DIR" ]] && echo "Taille   : $(du -sh "$DEST_DIR" | cut -f1)"
-
-if [[ ${#FAILED[@]} -gt 0 ]]; then
-  echo ""
-  echo "Échecs (${#FAILED[@]}) : ${FAILED[*]}"
-  echo "Réessayer : $0 --models $(IFS=','; echo "${FAILED[*]}")"
+if [[ -f "$OUT_DIR/model.bin" ]]; then
+  size=$(du -sh "$OUT_DIR" | cut -f1)
+  echo "✅ $MODEL_KEY converti avec succès ($size)"
+  echo "   Fichiers : $(ls "$OUT_DIR" | grep -v '^\.gitkeep$' | tr '\n' ' ')"
+else
+  echo "❌ Conversion échouée : model.bin absent dans $OUT_DIR"
   exit 1
 fi
-echo "✅ Tous les modèles sont prêts."

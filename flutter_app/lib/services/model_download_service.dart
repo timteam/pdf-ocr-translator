@@ -4,11 +4,12 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-// ─── Dépôt HuggingFace hébergeant les modèles CTranslate2 pré-convertis ──────
-// Créez un Dataset HF public et uploadez vos modèles convertis avec :
+// ─── Dépôt HuggingFace hébergeant NLLB-200-distilled-600M (CTranslate2 INT8) ─
+// Uploadez le modèle converti avec :
+//   scripts/prepare_translation_models.sh
 //   scripts/upload_models_to_hf.sh --repo OWNER/REPO --hf-token hf_...
-// Puis remplacez OWNER/opus-mt-ct2 par votre identifiant de dépôt.
-const String kModelHfRepo = 'Timteamteem/opus-mt-ct2';
+// Puis remplacez OWNER/nllb-ct2 par votre identifiant de dépôt.
+const String kModelHfRepo = 'Timteamteem/nllb-ct2';
 
 class ModelDownloadService {
   static const String _hfApiBase =

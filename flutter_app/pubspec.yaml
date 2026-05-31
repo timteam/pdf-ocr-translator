@@ -45,30 +45,7 @@ flutter:
     - assets/models/onnx/
     - assets/scripts/
     - assets/translation_models/
-    - assets/translation_models/ja-en/
-    - assets/translation_models/zh-en/
-    - assets/translation_models/ko-en/
-    - assets/translation_models/ru-en/
-    - assets/translation_models/ar-en/
-    - assets/translation_models/hi-en/
-    - assets/translation_models/th-en/
-    - assets/translation_models/vi-en/
-    - assets/translation_models/de-en/
-    - assets/translation_models/nl-en/
-    - assets/translation_models/pl-en/
-    - assets/translation_models/ROMANCE-en/
-    - assets/translation_models/en-ROMANCE/
-    - assets/translation_models/en-zh/
-    - assets/translation_models/en-de/
-    - assets/translation_models/en-nl/
-    - assets/translation_models/en-ru/
-    - assets/translation_models/en-hi/
-    - assets/translation_models/en-ar/
-    - assets/translation_models/en-vi/
-    - assets/translation_models/en-mul/
-    - assets/translation_models/tc-big-en-ar/
-    - assets/translation_models/tc-big-en-ko/
-    - assets/translation_models/en-sla/
+    - assets/translation_models/nllb-200-distilled-600M/
 
   fonts:
     - family: Roboto

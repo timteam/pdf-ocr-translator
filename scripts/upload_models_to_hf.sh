@@ -1,13 +1,12 @@
 #!/bin/bash
 #
-# Upload des modèles CTranslate2 vers un dépôt HuggingFace Dataset.
+# Upload du modèle NLLB-200-distilled-600M (CTranslate2 INT8) vers un dépôt HuggingFace Dataset.
 # Compare les SHA-256 locaux avec ceux du dépôt pour n'uploader que le nécessaire.
 # Utilise hf_transfer (Rust) pour les transferts — fiable sur les gros fichiers.
 #
 # Usage :
-#   ./scripts/upload_models_to_hf.sh --repo Timteamteem/opus-mt-ct2 --hf-token hf_...
-#   ./scripts/upload_models_to_hf.sh --repo Timteamteem/opus-mt-ct2 --yes
-#   ./scripts/upload_models_to_hf.sh --repo Timteamteem/opus-mt-ct2 --models ja-en,en-ROMANCE
+#   ./scripts/upload_models_to_hf.sh --repo Timteamteem/nllb-ct2 --hf-token hf_...
+#   ./scripts/upload_models_to_hf.sh --repo Timteamteem/nllb-ct2 --yes
 #
 # Prérequis : avoir exécuté prepare_translation_models.sh (installe huggingface_hub)
 
@@ -34,7 +33,7 @@ while [[ $# -gt 0 ]]; do
                 PRESELECT="$2"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Upload des modèles CTranslate2 vers HuggingFace Dataset.
+Upload de NLLB-200-distilled-600M (CTranslate2 INT8) vers HuggingFace Dataset.
 
 Usage: upload_models_to_hf.sh --repo OWNER/REPO [OPTIONS]
 
@@ -42,12 +41,11 @@ OPTIONS
   --repo OWNER/REPO   Dépôt HuggingFace Dataset cible
   --hf-token TOKEN    Token HuggingFace (accès Write)
   --yes, -y           Mode non-interactif : synchronise tout sans demander
-  --models KEY,...    Pré-sélectionner des modèles (ex: ja-en,en-ROMANCE)
   -h, --help          Cette aide
 
 WORKFLOW
-  1. Convertir  : ./scripts/prepare_translation_models.sh --small
-  2. Uploader   : ./scripts/upload_models_to_hf.sh --repo Timteamteem/opus-mt-ct2
+  1. Convertir  : ./scripts/prepare_translation_models.sh
+  2. Uploader   : ./scripts/upload_models_to_hf.sh --repo Timteamteem/nllb-ct2
 EOF
       exit 0 ;;
     *) echo "❌ Option inconnue : $1"; exit 1 ;;
@@ -88,10 +86,7 @@ G = '\033[0;32m'; Y = '\033[1;33m'; B = '\033[0;34m'
 R = '\033[0;31m'; N = '\033[0m'
 
 ALL_KEYS = [
-    "ja-en", "zh-en", "ko-en", "ru-en", "ar-en", "hi-en", "th-en", "vi-en",
-    "de-en", "nl-en", "pl-en", "ROMANCE-en",
-    "en-ROMANCE", "en-de", "en-nl", "en-ru", "en-hi", "en-zh", "en-ar",
-    "en-vi", "en-mul", "en-sla", "tc-big-en-ar", "tc-big-en-ko",
+    "nllb-200-distilled-600M",
 ]
 
 def sha256_of(path):

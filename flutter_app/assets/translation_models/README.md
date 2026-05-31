@@ -1,93 +1,79 @@
 # Translation Models Directory
 
-This directory contains the translation models for the pivot graph architecture used by `TranslationService`.
+Ce répertoire contient le modèle de traduction utilisé par `TranslationService`.
 
 ## Architecture
 
-The translation system uses a **star-shaped pivot graph** centered on English (en):
+L'application utilise **NLLB-200-distilled-600M** (No Language Left Behind) de Meta :
+
+- **200 langues** — traduction directe sans pivot intermédiaire
+- **Format CTranslate2 INT8** — environ 500–600 MB sur disque
+- **Un seul modèle** pour toutes les paires de langues supportées
 
 ```
-Source → English → Target
+Source (n'importe quelle langue)
+        │
+   [nllb-200-distilled-600M]
+        │
+ Cible (n'importe quelle langue)
 ```
 
-### Incoming Pivots (Source → English)
-- **Single language models**: ja-en, zh-en, ko-en, ru-en, ar-en, hi-en, th-en, vi-en, de-en, nl-en, pl-en
-- **Family models**: ROMANCE-en (fr, es, it, pt → en)
+## Codes de langue NLLB
 
-### Outgoing Pivots (English → Target)
-- **Family models**:
-  - en-ROMANCE (en → fr, es, it, pt) with language tokens
-  - en-mul (en → ja, th) with ISO 639-3 tokens
-  - en-sla (en → pl, etc.) with language tokens
-- **Single language models**: en-zh, en-de, en-nl, en-ru, en-hi
-- **TC-Big models**: tc-big-en-ar, tc-big-en-ko
+| Code interne | Code NLLB | Langue |
+|---|---|---|
+| `en` | `eng_Latn` | Anglais |
+| `fr` | `fra_Latn` | Français |
+| `es` | `spa_Latn` | Espagnol |
+| `de` | `deu_Latn` | Allemand |
+| `it` | `ita_Latn` | Italien |
+| `pt` | `por_Latn` | Portugais |
+| `nl` | `nld_Latn` | Néerlandais |
+| `pl` | `pol_Latn` | Polonais |
+| `ru` | `rus_Cyrl` | Russe |
+| `ja` | `jpn_Jpan` | Japonais |
+| `zh` | `zho_Hans` | Chinois simplifié |
+| `ko` | `kor_Hang` | Coréen |
+| `ar` | `ara_Arab` | Arabe |
+| `hi` | `hin_Deva` | Hindi |
+| `th` | `tha_Thai` | Thaï |
+| `vi` | `vie_Latn` | Vietnamien |
 
-## Model Format
+## Structure du répertoire
 
-Models are stored in **CTranslate2 format** (INT8 quantized) for optimal performance.
+```
+flutter_app/assets/translation_models/
+└── nllb-200-distilled-600M/
+    ├── model.bin                  # Modèle CTranslate2 INT8 (~500 MB, hors git)
+    ├── sentencepiece.bpe.model    # Tokenizer SentencePiece
+    ├── config.json
+    └── .gitkeep
+```
 
-Each model directory should contain:
-- `model.bin` or `model.onnx` - The quantized model weights
-- `vocab.*` - Vocabulary files
-- `config.json` - Model configuration (optional)
-
-## Model Preparation
-
-To download and prepare all models, run:
+## Préparation du modèle
 
 ```bash
 chmod +x scripts/prepare_translation_models.sh
 ./scripts/prepare_translation_models.sh
+
+# Avec token HuggingFace (recommandé)
+./scripts/prepare_translation_models.sh --hf-token hf_xxxx
+
+# Forcer la reconversion
+./scripts/prepare_translation_models.sh --clean
 ```
 
-### Options
-- `--list` - List all available models without downloading
-- `--small` - Download only a small subset for testing
-- `--clean` - Remove existing models before downloading
-- `-v, --verbose` - Enable verbose output
-
-### Requirements
-- `git` and `git-lfs` - For downloading models from HuggingFace
-- `python3` and `pip` - For CTranslate2 conversion
-- `ctranslate2` - Will be auto-installed if missing
-
-## Directory Structure
-
-```
-flutter_app/assets/translation_models/
-├── ja-en/           # Japanese → English
-├── zh-en/           # Chinese → English
-├── ko-en/           # Korean → English
-├── ru-en/           # Russian → English
-├── ar-en/           # Arabic → English
-├── hi-en/           # Hindi → English
-├── th-en/           # Thai → English
-├── vi-en/           # Vietnamese → English
-├── de-en/           # German → English
-├── nl-en/           # Dutch → English
-├── pl-en/           # Polish → English
-├── ROMANCE-en/      # Romance languages → English
-├── en-ROMANCE/      # English → Romance languages
-├── en-zh/           # English → Chinese
-├── en-de/           # English → German
-├── en-nl/           # English → Dutch
-├── en-ru/           # English → Russian
-├── en-hi/           # English → Hindi
-├── en-ar/           # English → Arabic
-├── en-vi/           # English → Vietnamese
-├── en-mul/          # English → Multiple (ja, th)
-├── tc-big-en-ar/    # TC-Big English → Arabic
-├── tc-big-en-ko/    # TC-Big English → Korean
-└── en-sla/          # English → Slavic languages
-```
+Le script télécharge `facebook/nllb-200-distilled-600M` (~1.2 GB) et le convertit
+en CTranslate2 INT8 (~500 MB).
 
 ## Notes
 
-- These directories are **placeholders** and should be populated with actual model files
-- The `.gitignore` file excludes these directories to avoid committing large model files
-- Models are bundled with the snap package at build time
-- For development, use `scripts/prepare_translation_models.sh` to generate models
+- `model.bin` n'est **pas** versionné dans git (trop volumineux)
+- `.gitkeep` marque le répertoire comme existant pour Flutter
+- Les modèles peuvent être bundlés dans le snap ou téléchargés à la volée depuis l'app
 
-## See Also
-- [TranslationService](lib/services/translation_service.dart) - The main translation service
-- [prepare_translation_models.sh](scripts/prepare_translation_models.sh) - Model preparation script
+## Voir aussi
+
+- [TranslationService](../../lib/services/translation_service.dart)
+- [prepare_translation_models.sh](../../../scripts/prepare_translation_models.sh)
+- [nllb_translate.py](../scripts/nllb_translate.py)

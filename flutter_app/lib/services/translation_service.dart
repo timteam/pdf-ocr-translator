@@ -7,28 +7,18 @@ import 'package:path/path.dart' as p;
 
 import 'app_logger.dart';
 
-/// Service de traduction utilisant un graphe de pivots pour le routage automatique.
+/// Service de traduction utilisant NLLB-200-distilled-600M (CTranslate2).
 ///
-/// # Architecture du graphe
+/// Un seul modèle couvre toutes les langues supportées — traduction directe
+/// sans pivot anglais intermédiaire.
 ///
-/// Le graphe est structuré en étoile avec l'anglais (en) comme pivot central :
+/// ## Codes de langue
+/// Les codes internes (BCP-47 court : fr, ja, zh…) sont convertis en codes
+/// NLLB (ex: fra_Latn, jpn_Jpan) avant d'appeler le script Python.
 ///
-///   Source → Anglais → Cible
-///
-/// ## Nœuds du graphe
-/// - Chaque nœud représente une langue (code BCP-47 : fr, en, ja, zh, etc.)
-/// - Chaque arête représente un modèle de traduction disponible
-///
-/// ## Routage automatique
-/// Pour traduire de A vers B :
-/// 1. Si modèle A→B existe : traduction directe
-/// 2. Sinon, si A→en et en→B existent : pivot via anglais
-/// 3. Sinon, impossible (retourne texte original)
-///
-/// ## Stockage des modèles
-/// Modèles bundlés dans :
-///   - Snap   : `$SNAP/data/flutter_assets/assets/translation_models/`
-///   - Debug  : `<exe_dir>/data/flutter_assets/assets/translation_models/`
+/// ## Stockage du modèle
+///   Snap   : `$SNAP/data/flutter_assets/assets/translation_models/nllb-200-distilled-600M/`
+///   Debug  : `<exe_dir>/data/flutter_assets/assets/translation_models/nllb-200-distilled-600M/`
 ///
 /// Génération : `scripts/prepare_translation_models.sh`
 class TranslationService {
@@ -38,71 +28,30 @@ class TranslationService {
   final Map<String, String> _cache = {};
 
   // ============================================================================
-  // GRAPHE DE PIVOTS
+  // CODES NLLB-200
   // ============================================================================
 
-  /// Modèles de traduction disponibles, organisés par type.
-  ///
-  /// Structure : {
-  ///   'src-tgt': (répertoire_du_modèle, token_de_langue_optionnel)
-  /// }
-  ///
-  /// Le token de langue est préfixé aux tokens source pour les modèles
-  /// multi-langues (ex: ROMANCE, mul, sla).
-  static const _modelGraph = <String, (String, String?)>{
-    // ========================================================================
-    // PIVOT ENTRANT : Source → Anglais
-    // ========================================================================
-
-    // Modèles OPUS-MT dédiés
-    'ja-en': ('ja-en', null),           // Japonais → Anglais
-    'zh-en': ('zh-en', null),           // Chinois → Anglais
-    'ko-en': ('ko-en', null),           // Coréen → Anglais
-    'ru-en': ('ru-en', null),           // Russe → Anglais
-    'ar-en': ('ar-en', null),           // Arabe → Anglais
-    'hi-en': ('hi-en', null),           // Hindi → Anglais
-    'th-en': ('th-en', null),           // Thaï → Anglais
-    'vi-en': ('vi-en', null),           // Vietnamien → Anglais
-    'de-en': ('de-en', null),           // Allemand → Anglais
-    'nl-en': ('nl-en', null),           // Néerlandais → Anglais
-    'pl-en': ('pl-en', null),           // Polonais → Anglais
-
-    // Modèles groupés par famille linguistique
-    'fr-en': ('ROMANCE-en', null),      // Français → Anglais (famille ROMANCE)
-    'es-en': ('ROMANCE-en', null),      // Espagnol → Anglais
-    'pt-en': ('ROMANCE-en', null),      // Portugais → Anglais
-    'it-en': ('ROMANCE-en', null),      // Italien → Anglais
-
-    // ========================================================================
-    // PIVOT SORTANT : Anglais → Cible
-    // ========================================================================
-
-    // Familles linguistiques (multi-langues)
-    'en-fr': ('en-ROMANCE', '>>fr<<'),   // Anglais → Français (ROMANCE)
-    'en-es': ('en-ROMANCE', '>>es<<'),   // Anglais → Espagnol
-    'en-pt': ('en-ROMANCE', '>>pt<<'),   // Anglais → Portugais
-    'en-it': ('en-ROMANCE', '>>it<<'),   // Anglais → Italien
-
-    'en-zh': ('en-zh', '>>cmn<<'),      // Anglais → Chinois (Mandarin)
-    'en-ar': ('tc-big-en-ar', '>>ara<<'), // Anglais → Arabe (TC-Big)
-    'en-vi': ('en-vi', '>>vie<<'),       // Anglais → Vietnamien
-    'en-ja': ('en-mul', '>>jpn<<'),      // Anglais → Japonais (multi)
-    'en-th': ('en-mul', '>>tha<<'),      // Anglais → Thaï (multi)
-    'en-ko': ('tc-big-en-ko', null),     // Anglais → Coréen (TC-Big dédié)
-    'en-pl': ('en-sla', '>>pol<<'),      // Anglais → Polonais (langues slaves)
-
-    // Modèles OPUS-MT dédiés
-    'en-de': ('en-de', null),            // Anglais → Allemand
-    'en-nl': ('en-nl', null),            // Anglais → Néerlandais
-    'en-ru': ('en-ru', null),            // Anglais → Russe
-    'en-hi': ('en-hi', null),            // Anglais → Hindi
+  /// Correspondance code interne (BCP-47 court) → code NLLB.
+  static const _nllbCodes = <String, String>{
+    'en': 'eng_Latn',
+    'fr': 'fra_Latn',
+    'es': 'spa_Latn',
+    'de': 'deu_Latn',
+    'it': 'ita_Latn',
+    'pt': 'por_Latn',
+    'nl': 'nld_Latn',
+    'pl': 'pol_Latn',
+    'ru': 'rus_Cyrl',
+    'ja': 'jpn_Jpan',
+    'zh': 'zho_Hans',
+    'ko': 'kor_Hang',
+    'ar': 'ara_Arab',
+    'hi': 'hin_Deva',
+    'th': 'tha_Thai',
+    'vi': 'vie_Latn',
   };
 
-  /// Ensemble de toutes les langues supportées (extrait du graphe).
-  static final _supportedLanguages = _modelGraph.keys
-      .expand((pair) => pair.split('-'))
-      .toSet()
-    ..add('en'); // Anglais toujours supporté
+  static const _modelDirName = 'nllb-200-distilled-600M';
 
   // ============================================================================
   // API STATIQUE — vérification des modèles sans instanciation
@@ -137,21 +86,10 @@ class TranslationService {
     return File(p.join(bundleBase, modelName, 'model.bin')).existsSync();
   }
 
-  /// Noms des répertoires de modèles requis pour traduire [from] → [to].
-  /// Utilise la même logique que [_findPath] mais de façon statique.
+  /// Le seul modèle requis pour toute paire de langues est NLLB.
   static Set<String> requiredModelDirs(String from, String to) {
     if (from == to) return {};
-    if (_modelGraph.containsKey('$from-$to')) {
-      return {_modelGraph['$from-$to']!.$1};
-    }
-    final result = <String>{};
-    if (from != 'en' && to != 'en') {
-      final incoming = _modelGraph['$from-en'];
-      final outgoing = _modelGraph['en-$to'];
-      if (incoming != null) result.add(incoming.$1);
-      if (outgoing != null) result.add(outgoing.$1);
-    }
-    return result;
+    return {_modelDirName};
   }
 
   // ============================================================================
@@ -160,15 +98,13 @@ class TranslationService {
 
   Future<void> initialize() async {
     final appDir = await getApplicationSupportDirectory();
-
-    // Copie du script Python pour l'exécution
-    _scriptPath = p.join(appDir.path, 'opusmt_translate.py');
-    final src = await rootBundle.loadString('assets/scripts/opusmt_translate.py');
+    _scriptPath = p.join(appDir.path, 'nllb_translate.py');
+    final src = await rootBundle.loadString('assets/scripts/nllb_translate.py');
     await File(_scriptPath).writeAsString(src);
 
     await _loadCache();
     logger.i('TranslationService initialisé | Cache: ${_cache.length} entrées | '
-             'Langues supportées: ${_supportedLanguages.length}');
+             'Langues supportées: ${_nllbCodes.length}');
   }
 
   // ============================================================================
@@ -176,8 +112,6 @@ class TranslationService {
   // ============================================================================
 
   /// Traduit un texte unique.
-  ///
-  /// Utilise le cache si disponible, sinon appelle la traduction.
   Future<String> translateText(
     String text,
     String fromLanguage,
@@ -193,15 +127,12 @@ class TranslationService {
     }
 
     final results = await translateBatch([text], fromLanguage, toLanguage);
-    final translated = results.first;
-    _cache[cacheKey] = translated;
+    _cache[cacheKey] = results.first;
     await _saveCache();
-    return translated;
+    return results.first;
   }
 
-  /// Traduit un batch de textes.
-  ///
-  /// Optimise en groupant les traductions et en utilisant le cache.
+  /// Traduit un batch de textes en un seul appel Python.
   Future<List<String>> translateBatch(
     List<String> texts,
     String fromLanguage,
@@ -213,17 +144,15 @@ class TranslationService {
     final results = List<String?>.filled(texts.length, null);
     final uncachedIndices = <int>[];
 
-    // Séparation cache / non-cache
     for (var i = 0; i < texts.length; i++) {
       final key = _buildCacheKey(fromLanguage, toLanguage, texts[i]);
       results[i] = _cache[key];
       if (results[i] == null) uncachedIndices.add(i);
     }
 
-    // Traduction des entrées non en cache
     if (uncachedIndices.isNotEmpty) {
       final uncachedTexts = uncachedIndices.map((i) => texts[i]).toList();
-      final translated = await _translateWithGraph(
+      final translated = await _translateDirect(
         uncachedTexts,
         fromLanguage,
         toLanguage,
@@ -232,8 +161,7 @@ class TranslationService {
       for (var j = 0; j < uncachedIndices.length; j++) {
         final i = uncachedIndices[j];
         results[i] = translated[j];
-        final key = _buildCacheKey(fromLanguage, toLanguage, texts[i]);
-        _cache[key] = translated[j];
+        _cache[_buildCacheKey(fromLanguage, toLanguage, texts[i])] = translated[j];
       }
       await _saveCache();
     }
@@ -244,11 +172,11 @@ class TranslationService {
   /// Vérifie si une paire de langues est supportée.
   bool isLanguagePairSupported(String from, String to) {
     if (from == to) return true;
-    return _modelGraph.containsKey('$from-$to');
+    return _nllbCodes.containsKey(from) && _nllbCodes.containsKey(to);
   }
 
   /// Retourne la liste de toutes les langues supportées.
-  Set<String> get supportedLanguages => Set.unmodifiable(_supportedLanguages);
+  Set<String> get supportedLanguages => Set.unmodifiable(_nllbCodes.keys);
 
   /// Vide le cache de traduction.
   Future<void> clearCache() async {
@@ -265,101 +193,42 @@ class TranslationService {
   int getCacheSize() => _cache.length;
 
   // ============================================================================
-  // ROUTAGE VIA GRAPHE DE PIVOTS
+  // TRADUCTION DIRECTE
   // ============================================================================
 
-  /// Trouve le chemin optimal dans le graphe pour traduire de src vers tgt.
-  ///
-  /// Retourne une liste de paires (étapes) à exécuter.
-  /// Exemple : ['fr-en', 'en-de'] pour fr→de via pivot anglais.
-  List<String> _findPath(String src, String tgt) {
-    if (src == tgt) return [];
-
-    // 1. Tentative de traduction directe
-    if (_modelGraph.containsKey('$src-$tgt')) {
-      logger.d('Chemin direct trouvé: $src-$tgt');
-      return ['$src-$tgt'];
-    }
-
-    // 2. Tentative de pivot via l'anglais
-    if (src != 'en' && tgt != 'en') {
-      if (_modelGraph.containsKey('$src-en') &&
-          _modelGraph.containsKey('en-$tgt')) {
-        logger.d('Chemin pivot trouvé: $src-en + en-$tgt');
-        return ['$src-en', 'en-$tgt'];
-      }
-    }
-
-    // 3. Aucune route disponible
-    logger.w('Aucune route de traduction disponible: $src → $tgt');
-    return [];
-  }
-
-  /// Exécute la traduction en suivant le chemin trouvé dans le graphe.
-  Future<List<String>> _translateWithGraph(
+  Future<List<String>> _translateDirect(
     List<String> texts,
     String src,
     String tgt,
   ) async {
-    final path = _findPath(src, tgt);
+    final srcCode = _nllbCodes[src] ?? 'eng_Latn';
+    final tgtCode = _nllbCodes[tgt] ?? 'fra_Latn';
+    final modelDir = _getModelDir(_modelDirName);
 
-    if (path.isEmpty) {
-      logger.w('Traduction impossible: $src → $tgt (aucune route)');
+    if (!_isModelAvailable(_modelDirName)) {
+      logger.w('Modèle NLLB non disponible');
+      throw Exception('Modèle $_modelDirName introuvable');
+    }
+
+    logger.i('Traduction NLLB: $src ($srcCode) → $tgt ($tgtCode) | ${texts.length} segment(s)');
+    try {
+      return await _callPython(texts, modelDir, srcCode, tgtCode);
+    } catch (e) {
+      logger.w('Traduction $src→$tgt échouée ($e) — textes conservés.');
       return List.from(texts);
     }
-
-    var currentTexts = List<String>.from(texts);
-
-    for (final step in path) {
-      logger.i('Étape de traduction: $step (${currentTexts.length} segments)');
-      try {
-        currentTexts = await _translateStep(currentTexts, step);
-      } catch (e) {
-        logger.w('Étape $step échouée ($e) — textes conservés sans traduction.');
-        return List.from(texts); // retour aux textes originaux
-      }
-    }
-
-    return currentTexts;
-  }
-
-  /// Exécute une seule étape de traduction (une paire source-cible).
-  Future<List<String>> _translateStep(
-    List<String> texts,
-    String pair,
-  ) async {
-    final spec = _modelGraph[pair]!;
-    final (modelName, langToken) = spec;
-    final modelDir = _getModelDir(modelName);
-
-    // Vérification de disponibilité du modèle
-    if (!_isModelAvailable(modelName)) {
-      logger.w('Modèle non disponible: $modelName pour la paire $pair');
-      throw Exception('Modèle $modelName introuvable');
-    }
-
-    return await _callPython(texts, pair, modelDir, langToken);
   }
 
   // ============================================================================
   // CHEMINS DES MODÈLES
   // ============================================================================
 
-  /// Chemin vers le répertoire d'un modèle bundlé.
-  ///
-  /// Structure :
-  ///   snap   : `$SNAP/data/flutter_assets/assets/translation_models/{name}/`
-  ///   debug  : `<exe_dir>/data/flutter_assets/assets/translation_models/{name}/`
-  ///   dev    : `<app_support_dir>/translation_models/` (copié depuis assets)
   String _getModelDir(String modelName) {
-    // 1. Modèles téléchargés à l'exécution (priorité sur les modèles bundlés)
     final userDir = userModelsDir();
     if (userDir != null) {
       final userPath = p.join(userDir, modelName);
       if (File(p.join(userPath, 'model.bin')).existsSync()) return userPath;
     }
-
-    // 2. Modèles bundlés (snap ou debug)
     final snap = Platform.environment['SNAP'];
     if (snap != null && snap.isNotEmpty) {
       return p.join(snap, 'data', 'flutter_assets', 'assets', 'translation_models', modelName);
@@ -368,32 +237,23 @@ class TranslationService {
     return p.join(exeDir, 'data', 'flutter_assets', 'assets', 'translation_models', modelName);
   }
 
-  /// Vérifie si un modèle CTranslate2 est disponible sur le système de fichiers.
-  ///
-  /// Seul `model.bin` (format CTranslate2) est accepté par opusmt_translate.py.
-  /// Les autres formats (onnx, pt, safetensors) ne sont pas supportés.
   bool _isModelAvailable(String modelName) => isModelDirAvailable(modelName);
 
   // ============================================================================
   // EXÉCUTION PYTHON
   // ============================================================================
 
-  /// Appelle le script Python de traduction OPUS-MT.
   Future<List<String>> _callPython(
     List<String> texts,
-    String pair,
     String modelDir,
-    String? langToken,
+    String srcCode,
+    String tgtCode,
   ) async {
-    final logPrefix = '[$pair]';
-
-    final args = [_scriptPath, modelDir];
-    if (langToken != null) {
-      args.addAll(['--token', langToken]);
-    }
+    final logPrefix = '[$srcCode→$tgtCode]';
+    final args = [_scriptPath, modelDir, srcCode, tgtCode];
 
     final env = _buildPythonEnv();
-    final pythonBin = 'python3.12';
+    const pythonBin = 'python3.12';
     logger.d('$logPrefix CMD: $pythonBin ${args.join(' ')}');
     logger.d('$logPrefix PYTHONPATH=${env['PYTHONPATH'] ?? '(non défini)'}');
     logger.d('$logPrefix LD_LIBRARY_PATH=${env['LD_LIBRARY_PATH'] ?? '(non défini)'}');
@@ -436,7 +296,7 @@ class TranslationService {
 
     if (exitCode != 0) {
       throw Exception(
-        '$logPrefix opusmt_translate.py exit=$exitCode\n${stderrBuffer.toString().trim()}',
+        '$logPrefix nllb_translate.py exit=$exitCode\n${stderrBuffer.toString().trim()}',
       );
     }
 
@@ -451,10 +311,6 @@ class TranslationService {
   }
 
   /// Construit l'environnement pour l'exécution Python.
-  ///
-  /// Gère :
-  /// - PYTHONPATH pour pyenv snap
-  /// - LD_LIBRARY_PATH pour les libs ctranslate2 et numpy
   Map<String, String> _buildPythonEnv() {
     final env = Map<String, String>.from(Platform.environment);
 
@@ -467,7 +323,6 @@ class TranslationService {
 
     env['PYTHONPATH'] = localPyenv;
 
-    // Ajout des chemins des bibliothèques compilées
     final wheelLibDirs = [
       p.join(localPyenv, 'ctranslate2.libs'),
       p.join(localPyenv, 'numpy.libs'),
@@ -486,18 +341,16 @@ class TranslationService {
   // GESTION DU CACHE
   // ============================================================================
 
-  /// Génère une clé de cache unique pour une traduction.
   String _buildCacheKey(String from, String to, String text) {
     return '$from→$to:${text.hashCode}';
   }
 
-  /// Charge le cache depuis le fichier.
   Future<void> _loadCache() async {
     try {
       final appDir = await getApplicationSupportDirectory();
       final cacheFile = File(p.join(appDir.path, 'translation_cache.json'));
       if (await cacheFile.exists()) {
-        final data = json.decode(await cacheFile.readAsString()) 
+        final data = json.decode(await cacheFile.readAsString())
             as Map<String, dynamic>;
         _cache.addAll(Map<String, String>.from(data));
         logger.i('Cache chargé: ${_cache.length} entrées');
@@ -507,7 +360,6 @@ class TranslationService {
     }
   }
 
-  /// Sauvegarde le cache dans le fichier.
   Future<void> _saveCache() async {
     try {
       final appDir = await getApplicationSupportDirectory();

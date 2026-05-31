@@ -39,7 +39,7 @@ PDF source
   ├── Phase 2 — Traduction
   │     pdftoppm 600 DPI → PNG
   │     paddle_runner.py → blocs texte + bounding boxes
-  │     opusmt_translate.py → Opus-MT (CTranslate2) via graphe de pivots
+  │     nllb_translate.py → NLLB-200-distilled-600M (CTranslate2) traduction directe
   │     compute() → PDF de page (isolate Flutter)
   │
   └── pdfunite ─────────────────────────── PDF de sortie assemblé
@@ -47,76 +47,61 @@ PDF source
 
 ---
 
-## Graphe de pivots de traduction
+## Modèle de traduction
 
-La traduction passe toujours par l'anglais comme langue pivot centrale.
+L'application utilise **[NLLB-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M)** de Meta AI :
+
+- **200 langues** — traduction directe sans pivot intermédiaire (ex : japonais → français en une seule passe)
+- **Format CTranslate2 INT8** — ~500 MB, inférence CPU optimisée
+- **Un seul modèle** remplace l'ancien graphe de 24 modèles Opus-MT
 
 ```
-          Source
-            │
-       [source → en]   ← modèle pivot entrant
-            │
-        ANGLAIS
-            │
-        [en → cible]   ← modèle pivot sortant
-            │
-          Cible
+   Source ──[NLLB-200]──▶ Cible
 ```
 
-**Exemple :** japonais → français = `ja-en` (opus-mt-ja-en) + `en-ROMANCE` (token `>>fr<<`)
+### Codes de langue
 
-### Modèles disponibles
-
-| Direction | Modèle | Langues couvertes |
-|-----------|--------|-------------------|
-| **→ anglais** | `opus-mt-ja-en` | Japonais |
-| | `opus-mt-zh-en` | Chinois |
-| | `opus-mt-ko-en` | Coréen |
-| | `opus-mt-ru-en` | Russe |
-| | `opus-mt-ar-en` | Arabe |
-| | `opus-mt-hi-en` | Hindi |
-| | `opus-mt-th-en` | Thaï |
-| | `opus-mt-vi-en` | Vietnamien |
-| | `opus-mt-de-en` | Allemand |
-| | `opus-mt-nl-en` | Néerlandais |
-| | `opus-mt-pl-en` | Polonais |
-| | `opus-mt-ROMANCE-en` | Français, Espagnol, Italien, Portugais |
-| **anglais →** | `opus-mt-en-ROMANCE` | Français (`>>fr<<`), Espagnol (`>>es<<`), Italien (`>>it<<`), Portugais (`>>pt<<`) |
-| | `opus-mt-en-de` | Allemand |
-| | `opus-mt-en-nl` | Néerlandais |
-| | `opus-mt-en-ru` | Russe |
-| | `opus-mt-en-hi` | Hindi |
-| | `opus-mt-en-zh` | Chinois (`>>cmn<<`) |
-| | `opus-mt-en-vi` | Vietnamien (`>>vie<<`) |
-| | `opus-mt-en-ar` | Arabe (`>>ara<<`) |
-| | `opus-mt-en-mul` | Japonais (`>>jpn<<`), Thaï (`>>tha<<`) |
-| | `opus-mt-en-sla` | Polonais (`>>pol<<`) |
-| | `opus-mt-tc-big-en-ko` | Coréen |
-
-Tous les modèles proviennent de [Helsinki-NLP](https://huggingface.co/Helsinki-NLP) et sont convertis au format CTranslate2 INT8 par `scripts/prepare_translation_models.sh`.
+| Langue | Code interne | Code NLLB |
+|--------|---|---|
+| Anglais | `en` | `eng_Latn` |
+| Français | `fr` | `fra_Latn` |
+| Espagnol | `es` | `spa_Latn` |
+| Allemand | `de` | `deu_Latn` |
+| Italien | `it` | `ita_Latn` |
+| Portugais | `pt` | `por_Latn` |
+| Néerlandais | `nl` | `nld_Latn` |
+| Polonais | `pl` | `pol_Latn` |
+| Russe | `ru` | `rus_Cyrl` |
+| Japonais | `ja` | `jpn_Jpan` |
+| Chinois (simp.) | `zh` | `zho_Hans` |
+| Coréen | `ko` | `kor_Hang` |
+| Arabe | `ar` | `ara_Arab` |
+| Hindi | `hi` | `hin_Deva` |
+| Thaï | `th` | `tha_Thai` |
+| Vietnamien | `vi` | `vie_Latn` |
 
 ---
 
 ## Langues supportées
 
-| Code | Langue | Script OCR | Pivot entrant | Pivot sortant |
-|------|--------|-----------|---------------|---------------|
-| `en` | English | ch (PP-OCRv4) | — | — |
-| `fr` | Français | ch | ROMANCE-en | en-ROMANCE `>>fr<<` |
-| `es` | Español | ch | ROMANCE-en | en-ROMANCE `>>es<<` |
-| `de` | Deutsch | ch | de-en | en-de |
-| `it` | Italiano | ch | ROMANCE-en | en-ROMANCE `>>it<<` |
-| `pt` | Português | ch | ROMANCE-en | en-ROMANCE `>>pt<<` |
-| `nl` | Nederlands | ch | nl-en | en-nl |
-| `pl` | Polski | ch | pl-en | en-sla `>>pol<<` |
-| `ru` | Русский | cyrillic (PP-OCRv5) | ru-en | en-ru |
-| `ja` | 日本語 | japan (PP-OCRv1) | ja-en | en-mul `>>jpn<<` |
-| `zh` | 中文 | ch | zh-en | en-zh `>>cmn<<` |
-| `ko` | 한국어 | korean (PP-OCRv1) | ko-en | tc-big-en-ko |
-| `ar` | العربية | arabic (PP-OCRv5) | ar-en | en-ar `>>ara<<` |
-| `hi` | हिन्दी | devanagari (PP-OCRv5) | hi-en | en-hi |
-| `th` | ไทย | thai (PP-OCRv5) | th-en | en-mul `>>tha<<` |
-| `vi` | Tiếng Việt | ch | vi-en | en-vi `>>vie<<` |
+| Code | Langue | Script OCR |
+|------|--------|-----------|
+| `en` | English | ch (PP-OCRv4) |
+| `fr` | Français | ch |
+| `es` | Español | ch |
+| `de` | Deutsch | ch |
+| `it` | Italiano | ch |
+| `pt` | Português | ch |
+| `nl` | Nederlands | ch |
+| `pl` | Polski | ch |
+| `ru` | Русский | cyrillic (PP-OCRv5) |
+| `ja` | 日本語 | japan (PP-OCRv1) |
+| `zh` | 中文 | ch |
+| `ko` | 한국어 | korean (PP-OCRv1) |
+| `ar` | العربية | arabic (PP-OCRv5) |
+| `hi` | हिन्दी | devanagari (PP-OCRv5) |
+| `th` | ไทย | thai (PP-OCRv5) |
+| `vi` | Tiếng Việt | ch |
 
 ---
 
@@ -130,7 +115,7 @@ RapidOCR normalise en interne avec `(px/255 − 0.5) / 0.5` sur image BGR 3 cana
 | Unsharp masking | Variance Laplacien < 150 | Renforce les bords pour DBNet |
 | Aucun préprocessing | Image déjà nette | Évite d'introduire des artefacts inutiles |
 
-**Ne jamais appliquer** : binarisation Otsu, conversion en niveaux de gris, deskew Python (le deskew Dart 3 passes ±85° est déjà appliqué en amont).
+**Ne jamais appliquer** : binarisation Otsu, conversion en niveaux de gris, deskew Python (le deskew Dart 3 passes ±10° est déjà appliqué en amont).
 
 ---
 
@@ -169,12 +154,12 @@ sudo snap install gnome-46-2404
 
 Python, les wheels et poppler ne sont **pas** à installer sur la machine de build — ils sont téléchargés et bundlés automatiquement.
 
-### Modèles de traduction — deux modes de livraison
+### Modèle de traduction — deux modes de livraison
 
-Les modèles Helsinki-NLP sont en format **PyTorch** sur HuggingFace. L'app utilise **CTranslate2** comme moteur d'inférence — format incompatible, plus léger (INT8 ~45 MB vs PyTorch ~300 MB), sans dépendance à PyTorch au runtime. Une conversion one-shot est donc nécessaire.
+Le modèle **NLLB-200-distilled-600M** (facebook) est converti depuis PyTorch en **CTranslate2 INT8** (~500 MB) lors du build. Aucune dépendance à PyTorch au runtime.
 
 ```
-HuggingFace (PyTorch ~300 MB)
+facebook/nllb-200-distilled-600M (PyTorch ~1.2 GB)
         │
   [prepare_translation_models.sh]   ← conversion CTranslate2 INT8, one-shot dev
         │
@@ -184,7 +169,7 @@ HuggingFace (PyTorch ~300 MB)
 Bundlé dans le snap              Téléchargeable à la volée
 flutter_app/assets/              depuis l'app (runtime)
 translation_models/              → ~/.local/share/pdf-ocr-translator/
-                                   translation_models/
+nllb-200-distilled-600M/           translation_models/
 ```
 
 **Mode 1 — Bundlé dans le snap (build-time)**
@@ -193,49 +178,43 @@ translation_models/              → ~/.local/share/pdf-ocr-translator/
 chmod +x scripts/prepare_translation_models.sh
 ./scripts/prepare_translation_models.sh
 
-# Options utiles
-./scripts/prepare_translation_models.sh --list              # liste sans télécharger
-./scripts/prepare_translation_models.sh --small             # 4 modèles (test rapide)
-./scripts/prepare_translation_models.sh --clean             # recommence de zéro
-./scripts/prepare_translation_models.sh --hf-token hf_xxxx # avec token HuggingFace
+# Avec token HuggingFace (recommandé)
+./scripts/prepare_translation_models.sh --hf-token hf_xxxx
+
+# Forcer la reconversion
+./scripts/prepare_translation_models.sh --clean
 ```
 
-Les modèles (~50 MB chacun) sont écrits dans `flutter_app/assets/translation_models/` et bundlés dans le snap au prochain build.
+Le modèle (~500 MB) est écrit dans `flutter_app/assets/translation_models/nllb-200-distilled-600M/` et bundlé dans le snap au prochain build.
 
 **Mode 2 — Téléchargement à la volée depuis l'app (runtime)**
 
-L'app détecte les modèles manquants sur l'écran de confirmation et propose de les télécharger directement — sans sortir de l'interface, sans script, en mode snap comme en mode dev.
+L'app détecte si le modèle est manquant et propose de le télécharger directement depuis un dépôt HuggingFace Dataset. Le modèle est stocké dans `~/.local/share/pdf-ocr-translator/translation_models/` (prioritaire sur le modèle bundlé).
 
-Les modèles sont téléchargés depuis un dépôt HuggingFace Dataset hébergeant les binaires CTranslate2 pré-convertis, et stockés dans `~/.local/share/pdf-ocr-translator/translation_models/` (prioritaire sur les modèles bundlés).
-
-Pour activer ce mode, le développeur doit uploader les modèles convertis une fois :
+Pour activer ce mode, uploader le modèle converti une fois :
 
 ```bash
 # 1. Convertir
-./scripts/prepare_translation_models.sh --small --hf-token hf_...
+./scripts/prepare_translation_models.sh --hf-token hf_...
 
 # 2. Uploader vers le dépôt HF Dataset
 ./scripts/upload_models_to_hf.sh \
-  --repo Timteamteem/opus-mt-ct2 \
+  --repo Timteamteem/nllb-ct2 \
   --hf-token hf_...
 
-# 3. Mettre à jour la constante dans Flutter
+# 3. Vérifier la constante dans Flutter
 #    flutter_app/lib/services/model_download_service.dart
-#    → const String kModelHfRepo = 'Timteamteem/opus-mt-ct2';
+#    → const String kModelHfRepo = 'Timteamteem/nllb-ct2';
 ```
-
-Dépôt des modèles pré-convertis : [huggingface.co/datasets/Timteamteem/opus-mt-ct2](https://huggingface.co/datasets/Timteamteem/opus-mt-ct2)
-
-> **Pourquoi pas ONNX ?** ONNX Runtime est déjà bundlé pour l'OCR (forward pass simple). La traduction seq2seq nécessite une boucle autorégressive (beam search) que ONNX Runtime ne fournit pas — il faudrait l'implémenter manuellement. CTranslate2 l'encapsule en C++ et produit des modèles 6× plus petits que l'export ONNX fp32.
 
 #### Token HuggingFace (recommandé)
 
-Les modèles sont publics, mais un token évite le rate-limiting lors des 24 téléchargements. Crée un token **Read** sur [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+Le modèle `facebook/nllb-200-distilled-600M` est public mais un token évite le rate-limiting. Crée un token **Read** sur [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
 
-**`build-snap.sh` gère le token interactivement** au premier build et le met en cache dans `.hf_token` (gitignore, `chmod 600`) pour les builds suivants :
+**`build-snap.sh` gère le token interactivement** et le met en cache dans `.hf_token` (gitignore, `chmod 600`) :
 
 ```
-🔑 Token HuggingFace en cache : hf_pvjP****
+🔑 Token HuggingFace en cache : hf_xxxx****
    [Entrée] Réutiliser   [n] Nouveau   [s] Supprimer   [i] Ignorer
    >
 ```
@@ -303,19 +282,17 @@ pdf-ocr-translator/
 │       │       ├── cyrillic_rec.onnx     # PP-OCRv5 mobile, ru
 │       │       ├── devanagari_rec.onnx   # PP-OCRv5 mobile, hi
 │       │       └── thai_rec.onnx         # PP-OCRv5 mobile, th
-│       ├── translation_models/           # Opus-MT CTranslate2 INT8 (généré par script)
-│       │   ├── ja-en/                    # model.bin + source.spm + target.spm
-│       │   ├── en-ROMANCE/
-│       │   └── ...                       # 23 répertoires au total
+│       ├── translation_models/           # NLLB-200 CTranslate2 INT8 (généré par script)
+│       │   └── nllb-200-distilled-600M/  # model.bin + sentencepiece.bpe.model
 │       └── scripts/
 │           ├── paddle_runner.py          # OCR et détection de script
 │           ├── fasttext_detect.py        # Classification de langue FastText
-│           └── opusmt_translate.py       # Traduction par lot CTranslate2
+│           └── nllb_translate.py         # Traduction par lot CTranslate2
 ├── scripts/
 │   ├── download_fasttext_model.sh        # Télécharge lid.176.ftz
 │   ├── download_pip_wheels.sh            # Télécharge les wheels Python
-│   ├── prepare_translation_models.sh    # Convertit les modèles Opus-MT → CTranslate2
-│   └── upload_models_to_hf.sh           # Upload des modèles convertis vers HF Dataset
+│   ├── prepare_translation_models.sh    # Télécharge et convertit NLLB → CTranslate2
+│   └── upload_models_to_hf.sh           # Upload du modèle converti vers HF Dataset
 ├── snapcraft.yaml                        # Snap (core24, confinement strict)
 ├── build-snap.sh                         # Orchestration du build complet
 └── install-local.sh                      # Installation + connexion GTK3
@@ -331,7 +308,7 @@ pdf-ocr-translator/
 | PDF | poppler-utils (`pdftoppm`, `pdfunite`) | Rendu et assemblage |
 | OCR | RapidOCR 1.4.4 + ONNX Runtime 1.26 | PP-OCRv4/v5 via ONNX, compatible AVX (sans AVX2) |
 | Détection langue | PP-OCRv4 (3 passes) + FastText LID 176 | Script Unicode → BCP-47 |
-| Traduction | Opus-MT (Helsinki-NLP) + CTranslate2 + sentencepiece | 23 modèles INT8, graphe étoile via EN |
+| Traduction | NLLB-200-distilled-600M (Meta) + CTranslate2 + sentencepiece | 1 modèle INT8, 200 langues, traduction directe |
 | Packaging | Snap (core24, confinement strict) | Autonome, sans dépendances système |
 
 > **Pourquoi ONNX Runtime ?** PaddlePaddle 3.3.1 utilise des instructions AVX2 absentes sur les CPUs Ivy Bridge (2012). ONNX Runtime dispatche les instructions au runtime — AVX suffit.
@@ -343,7 +320,7 @@ pdf-ocr-translator/
 - **OCR manuscrit** : PP-OCRv4 est optimisé pour le texte imprimé
 - **PDF vectoriel** : l'OCR n'est pas utile si le PDF contient déjà du texte sélectionnable
 - **Mise en page complexe** : les bounding boxes texte sont superposées mais la police de substitution ne correspond pas toujours à l'original
-- **Modèles de traduction** : peuvent être bundlés dans le snap (build-time via `prepare_translation_models.sh`) ou téléchargés à la volée depuis l'app — les modèles doivent avoir été uploadés sur le dépôt HF (`upload_models_to_hf.sh`) pour que le téléchargement runtime fonctionne
+- **Modèle de traduction** : NLLB-200-distilled-600M peut être bundlé dans le snap (build-time via `prepare_translation_models.sh`) ou téléchargé à la volée depuis l'app — le modèle doit avoir été uploadé sur le dépôt HF (`upload_models_to_hf.sh`) pour que le téléchargement runtime fonctionne
 
 ---
 
@@ -353,6 +330,6 @@ Apache License 2.0 — voir [LICENSE](LICENSE)
 
 ## Crédits
 
-[RapidOCR](https://github.com/RapidAI/RapidOCR) · [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [ONNX Runtime](https://onnxruntime.ai) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [Opus-MT / Helsinki-NLP](https://huggingface.co/Helsinki-NLP) · [Modèles CTranslate2 pré-convertis](https://huggingface.co/datasets/Timteamteem/opus-mt-ct2) · [FastText](https://fasttext.cc) · [Flutter](https://flutter.dev)
+[RapidOCR](https://github.com/RapidAI/RapidOCR) · [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [ONNX Runtime](https://onnxruntime.ai) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [NLLB-200 / Meta AI](https://huggingface.co/facebook/nllb-200-distilled-600M) · [FastText](https://fasttext.cc) · [Flutter](https://flutter.dev)
 
 Issues et contributions : [github.com/AgentLeChat/pdf-ocr-translator](https://github.com/AgentLeChat/pdf-ocr-translator)
