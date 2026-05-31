@@ -156,12 +156,12 @@ Python, les wheels et poppler ne sont **pas** à installer sur la machine de bui
 
 ### Modèle de traduction — deux modes de livraison
 
-Le modèle **NLLB-200-distilled-600M** (facebook) est converti depuis PyTorch en **CTranslate2 INT8** (~500 MB) lors du build. Aucune dépendance à PyTorch au runtime.
+Le modèle **NLLB-200-distilled-600M** est téléchargé directement au format **CTranslate2 INT8 pré-converti** (~500 MB). Aucun torch ni transformers requis.
 
 ```
-facebook/nllb-200-distilled-600M (PyTorch ~1.2 GB)
+michaelfeil/ct2fast-nllb-200-distilled-600M (~500 Mo, CT2 INT8 pré-converti)
         │
-  [prepare_translation_models.sh]   ← conversion CTranslate2 INT8, one-shot dev
+  [prepare_translation_models.sh]   ← téléchargement direct, one-shot dev
         │
   ┌─────┴──────────────────────────────────┐
   │                                        │
@@ -181,7 +181,7 @@ chmod +x scripts/prepare_translation_models.sh
 # Avec token HuggingFace (recommandé)
 ./scripts/prepare_translation_models.sh --hf-token hf_xxxx
 
-# Forcer la reconversion
+# Forcer le re-téléchargement
 ./scripts/prepare_translation_models.sh --clean
 ```
 

@@ -1,20 +1,20 @@
 #!/bin/bash
 #
-# Télécharge et convertit facebook/nllb-200-distilled-600M en CTranslate2 INT8.
+# Télécharge NLLB-200-distilled-600M (CTranslate2 INT8, pré-converti).
 #
 # Usage :
 #   ./scripts/prepare_translation_models.sh [OPTIONS]
 #
 # OPTIONS
 #   -h, --help          Cette aide
-#   --clean             Reconvertit même si model.bin existe déjà
+#   --clean             Re-télécharge même si model.bin existe déjà
 #   --hf-token TOKEN    Token HuggingFace (recommandé pour éviter le rate-limiting)
 #
 # WORKFLOW
-#   1. Installe ctranslate2, transformers, sentencepiece dans .ct2_cache/pkgs/
-#   2. Télécharge facebook/nllb-200-distilled-600M via snapshot_download
-#   3. Convertit en INT8 via convert_model.py
-#   4. Place le résultat dans assets/translation_models/nllb-200-distilled-600M/
+#   1. Installe huggingface_hub + hf-transfer (~quelques Mo, quelques secondes)
+#   2. Télécharge michaelfeil/ct2fast-nllb-200-distilled-600M (~500 Mo)
+#      (modèle CTranslate2 INT8 pré-converti — aucune dépendance torch/transformers)
+#   3. Place le résultat dans assets/translation_models/nllb-200-distilled-600M/
 #
 # DEST_DIR : flutter_app/assets/translation_models/ (non modifiable, fixé par pubspec)
 
@@ -30,22 +30,23 @@ HF_TOKEN_CACHE="$SCRIPT_DIR/../.hf_token"
 PIP_PYZ=""
 
 MODEL_KEY="nllb-200-distilled-600M"
-MODEL_HF="facebook/nllb-200-distilled-600M"
+# Modèle CTranslate2 INT8 pré-converti — évite torch + transformers
+MODEL_HF="michaelfeil/ct2fast-nllb-200-distilled-600M"
 
 # ─── Aide ─────────────────────────────────────────────────────────────────────
 usage() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Télécharge et convertit NLLB-200-distilled-600M en CTranslate2 INT8.
+Télécharge NLLB-200-distilled-600M (CTranslate2 INT8, pré-converti).
 
 OPTIONS
   -h, --help          Cette aide
-  --clean             Reconvertit même si model.bin existe déjà
+  --clean             Re-télécharge même si model.bin existe déjà
   --hf-token TOKEN    Token HuggingFace (évite le rate-limiting)
 
 MODÈLE
-  Source  : $MODEL_HF
+  Source  : $MODEL_HF (~500 Mo)
   Sortie  : $DEST_DIR/$MODEL_KEY/
 
 TOKEN HUGGINGFACE
@@ -53,25 +54,18 @@ TOKEN HUGGINGFACE
   Créer un token Read sur https://huggingface.co/settings/tokens
 
 EXEMPLES
-  $0                              # Téléchargement + conversion
-  $0 --clean                      # Forcer la reconversion
+  $0                              # Téléchargement direct
+  $0 --clean                      # Forcer le re-téléchargement
   $0 --hf-token hf_xxxx           # Avec token HF
 EOF
 }
 
-# ─── Packages de conversion ───────────────────────────────────────────────────
+# ─── Installation minimale : huggingface_hub + hf-transfer ───────────────────
 _pkgs_hash() {
   local py_ver
   py_ver=$(python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null || echo "?")
-  printf '%s\n' \
-    "py=${py_ver}" \
-    "ctranslate2" \
-    "transformers>=4.40,<5.5" \
-    "huggingface_hub>=0.20" \
-    "sentencepiece" \
-    "hf-transfer" \
-    "torch-cpu" \
-  | md5sum | cut -d' ' -f1
+  printf '%s\n' "py=${py_ver}" "huggingface_hub>=0.20" "hf-transfer" \
+    | md5sum | cut -d' ' -f1
 }
 
 setup_packages() {
@@ -80,12 +74,11 @@ setup_packages() {
 
   if [[ "$CLEAN" == false && -f "$PKGS_HASH_FILE" \
         && "$(cat "$PKGS_HASH_FILE")" == "$current_hash" ]]; then
-    if PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2, torch" 2>/dev/null; then
-      local ct2_ver torch_ver
-      ct2_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2; print(ctranslate2.__version__)" 2>/dev/null || echo "?")
-      torch_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "?")
-      echo "→ Packages en cache : ctranslate2 $ct2_ver / torch $torch_ver"
-      echo "  (--clean pour forcer la réinstallation)"
+    if PYTHONPATH="$PKGS_DIR" python3 -c "import huggingface_hub" 2>/dev/null; then
+      local hfhub_ver
+      hfhub_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c \
+        "import huggingface_hub; print(huggingface_hub.__version__)" 2>/dev/null || echo "?")
+      echo "→ huggingface_hub $hfhub_ver (cache)"
       return 0
     fi
     echo "→ Cache invalide — réinstallation…"
@@ -103,53 +96,24 @@ setup_packages() {
   curl -fL --progress-bar "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ"
   echo ""
 
-  echo "→ Installation des packages (ctranslate2, transformers, hf-transfer…)"
-  echo "  (~2-5 min à la première installation)"
+  echo "→ Installation huggingface_hub + hf-transfer…"
   python3 "$PIP_PYZ" install \
-    ctranslate2 \
-    "transformers>=4.40,<5.5" \
     "huggingface_hub>=0.20" \
-    sentencepiece \
     hf-transfer \
     --target "$PKGS_DIR" \
-    --cache-dir "$PIP_CACHE_DIR"
+    --cache-dir "$PIP_CACHE_DIR" \
+    --quiet
 
-  _install_torch || {
-    echo "❌ Impossible d'installer torch."
-    echo "   Workaround : sudo pip3 install torch --index-url https://download.pytorch.org/whl/cpu"
-    exit 1
-  }
-
-  local ct2_ver torch_ver
-  ct2_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2; print(ctranslate2.__version__)" 2>/dev/null || echo "")
-  torch_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c "import torch; print(torch.__version__)" 2>/dev/null || echo "")
-
-  if [[ -z "$ct2_ver" || -z "$torch_ver" ]]; then
-    echo "❌ Import check échoué"
-    PYTHONPATH="$PKGS_DIR" python3 -c "import ctranslate2, torch" 2>&1 | head -5
+  local hfhub_ver
+  hfhub_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c \
+    "import huggingface_hub; print(huggingface_hub.__version__)" 2>/dev/null || echo "")
+  if [[ -z "$hfhub_ver" ]]; then
+    echo "❌ Import huggingface_hub échoué"
     exit 1
   fi
-
-  echo ""
-  echo "→ ctranslate2 $ct2_ver / torch $torch_ver prêts"
+  echo "→ huggingface_hub $hfhub_ver prêt"
   echo "$current_hash" > "$PKGS_HASH_FILE"
   echo ""
-}
-
-_install_torch() {
-  if PYTHONPATH="$PKGS_DIR" python3 -c "import torch" 2>/dev/null; then
-    echo "→ torch déjà disponible"
-    return 0
-  fi
-  echo "→ Installation torch CPU (tentative 1/2 : PyTorch CDN ~200 MB)…"
-  if python3 "$PIP_PYZ" install torch \
-      --index-url https://download.pytorch.org/whl/cpu \
-      --target "$PKGS_DIR" --cache-dir "$PIP_CACHE_DIR"; then
-    return 0
-  fi
-  echo "⚠  CDN PyTorch inaccessible — tentative 2/2 : PyPI --no-deps…"
-  python3 "$PIP_PYZ" install torch \
-    --no-deps --target "$PKGS_DIR" --cache-dir "$PIP_CACHE_DIR"
 }
 
 cleanup_packages() {
@@ -157,27 +121,33 @@ cleanup_packages() {
 }
 _on_interrupt() {
   echo ""; echo "⚠  Interruption — arrêt."
-  echo "   Relancez pour reprendre (model.bin absent = reconversion)."
+  echo "   Relancez pour reprendre (model.bin absent = re-téléchargement)."
   exit 130
 }
 trap cleanup_packages EXIT
 trap _on_interrupt INT TERM
 
-# ─── Téléchargement du modèle ─────────────────────────────────────────────────
+# ─── Téléchargement du modèle pré-converti ───────────────────────────────────
 _download_model() {
   local hf_id="$1" dest="$2"
-  echo "  Téléchargement $hf_id (~1.2 GB)…"
+  echo "  Téléchargement $hf_id (~500 Mo)…"
   _HF_ID="$hf_id" _DEST="$dest" \
-  PYTHONPATH="$PKGS_DIR" HF_XET_HIGH_PERFORMANCE=1 \
+  PYTHONPATH="$PKGS_DIR" HF_HUB_ENABLE_HF_TRANSFER=1 \
   python3 - <<'PYEOF'
 import os
 from huggingface_hub import snapshot_download
+# Seuls les fichiers nécessaires à CTranslate2 + nllb_translate.py
 snapshot_download(
     repo_id=os.environ["_HF_ID"],
     local_dir=os.environ["_DEST"],
     repo_type="model",
     token=os.environ.get("HF_TOKEN") or None,
-    ignore_patterns=["*.msgpack", "*.h5", "flax_model*", "tf_model*", "rust_model*", "*.ot"],
+    allow_patterns=[
+        "model.bin",
+        "sentencepiece.bpe.model",
+        "shared_vocabulary.json",
+        "config.json",
+    ],
 )
 PYEOF
 }
@@ -219,12 +189,12 @@ OUT_DIR="$DEST_DIR/$MODEL_KEY"
 
 if [[ "$CLEAN" == false && -f "$OUT_DIR/model.bin" ]]; then
   size=$(du -sh "$OUT_DIR/model.bin" | cut -f1)
-  echo "✅ $MODEL_KEY déjà converti ($size) — rien à faire."
-  echo "   Utilisez --clean pour forcer la reconversion."
+  echo "✅ $MODEL_KEY déjà présent ($size) — rien à faire."
+  echo "   Utilisez --clean pour forcer le re-téléchargement."
   exit 0
 fi
 
-echo "Conversion de $MODEL_KEY"
+echo "Téléchargement de $MODEL_KEY"
 echo "  Source  : $MODEL_HF"
 echo "  Sortie  : $OUT_DIR"
 echo ""
@@ -232,30 +202,23 @@ echo ""
 # ─── Packages ─────────────────────────────────────────────────────────────────
 setup_packages
 
-# ─── Téléchargement + Conversion ─────────────────────────────────────────────
-src_dir=$(mktemp -d)
-echo "[1/2] Téléchargement…"
-if ! _download_model "$MODEL_HF" "$src_dir"; then
+# ─── Téléchargement ───────────────────────────────────────────────────────────
+mkdir -p "$OUT_DIR" && touch "$OUT_DIR/.gitkeep"
+
+if ! _download_model "$MODEL_HF" "$OUT_DIR"; then
   echo "❌ Téléchargement échoué"
-  rm -rf "$src_dir"
   exit 1
 fi
-
-mkdir -p "$OUT_DIR" && touch "$OUT_DIR/.gitkeep"
-echo ""
-echo "[2/2] Conversion CTranslate2 INT8…"
-PYTHONPATH="$PKGS_DIR" python3 "$SCRIPT_DIR/convert_model.py" "$src_dir" "$OUT_DIR"
-
-rm -rf "$src_dir"
 
 # ─── Résumé ───────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════"
-if [[ -f "$OUT_DIR/model.bin" ]]; then
+if [[ -f "$OUT_DIR/model.bin" && -f "$OUT_DIR/sentencepiece.bpe.model" ]]; then
   size=$(du -sh "$OUT_DIR" | cut -f1)
-  echo "✅ $MODEL_KEY converti avec succès ($size)"
-  echo "   Fichiers : $(ls "$OUT_DIR" | grep -v '^\.gitkeep$' | tr '\n' ' ')"
+  echo "✅ $MODEL_KEY téléchargé ($size)"
+  echo "   Fichiers : $(ls "$OUT_DIR" | grep -v '^\.' | tr '\n' ' ')"
 else
-  echo "❌ Conversion échouée : model.bin absent dans $OUT_DIR"
+  echo "❌ Téléchargement incomplet : fichiers manquants dans $OUT_DIR"
+  ls -la "$OUT_DIR" || true
   exit 1
 fi

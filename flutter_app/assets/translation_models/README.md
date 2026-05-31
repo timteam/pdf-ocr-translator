@@ -63,8 +63,8 @@ chmod +x scripts/prepare_translation_models.sh
 ./scripts/prepare_translation_models.sh --clean
 ```
 
-Le script télécharge `facebook/nllb-200-distilled-600M` (~1.2 GB) et le convertit
-en CTranslate2 INT8 (~500 MB).
+Le script télécharge `michaelfeil/ct2fast-nllb-200-distilled-600M` (~500 MB) —
+modèle CTranslate2 INT8 pré-converti. Pas besoin de torch ni transformers.
 
 ## Notes
 
