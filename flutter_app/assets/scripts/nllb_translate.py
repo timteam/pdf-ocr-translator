@@ -12,6 +12,7 @@ Usage : python3 nllb_translate.py <model_dir> <src_lang> <tgt_lang>
 """
 import sys
 import os
+import time
 
 # Doit être positionné avant tout import de numpy/ctranslate2.
 _N_THREADS = "4"
@@ -20,6 +21,10 @@ os.environ.setdefault("MKL_NUM_THREADS",      _N_THREADS)
 os.environ.setdefault("OPENBLAS_NUM_THREADS", _N_THREADS)
 
 import json
+
+# Nombre de lignes par appel translate_batch. Réduit le gel en produisant des
+# résultats intermédiaires et permet de rapporter la progression à Dart via stderr.
+_CHUNK_SIZE = 16
 
 
 def _log(msg):
@@ -98,25 +103,45 @@ def main():
             if tokens is not None:
                 flat.append((ti, li, tokens))
 
-    _log(f"Batch : {len(flat)} ligne(s) à traduire…")
+    total_lines = len(flat)
+    _log(f"Batch : {total_lines} ligne(s) à traduire (chunks de {_CHUNK_SIZE})…")
     translated: dict[tuple[int, int], str] = {}
 
     if flat:
-        tokens_batch = [t for _, _, t in flat]
-        # NLLB nécessite target_prefix pour forcer le token de langue cible en sortie.
-        target_prefix = [[tgt_lang]] * len(tokens_batch)
-        _log("translate_batch — début…")
-        results = translator.translate_batch(
-            tokens_batch,
-            target_prefix=target_prefix,
-            beam_size=2,
-            max_decoding_length=512,
-        )
-        _log("translate_batch — terminé")
-        for (ti, li, _), result in zip(flat, results):
-            # Le premier token de sortie est le tgt_lang (token de contrôle) → ignorer.
-            output_tokens = result.hypotheses[0][1:]
-            translated[(ti, li)] = sp.decode(output_tokens)
+        n_chunks = (total_lines + _CHUNK_SIZE - 1) // _CHUNK_SIZE
+        done_count = 0
+        t_batch_start = time.monotonic()
+
+        for chunk_idx in range(n_chunks):
+            chunk = flat[chunk_idx * _CHUNK_SIZE : (chunk_idx + 1) * _CHUNK_SIZE]
+            tokens_batch = [t for _, _, t in chunk]
+            # NLLB nécessite target_prefix pour forcer le token de langue cible en sortie.
+            target_prefix = [[tgt_lang]] * len(tokens_batch)
+
+            _log(f"[chunk {chunk_idx + 1}/{n_chunks}] {len(tokens_batch)} seg — début…")
+            t0 = time.monotonic()
+            results = translator.translate_batch(
+                tokens_batch,
+                target_prefix=target_prefix,
+                beam_size=2,
+                max_decoding_length=512,
+            )
+            dt = time.monotonic() - t0
+            done_count += len(chunk)
+
+            # Rapporte la progression à Dart via stderr (parsé en temps réel côté Dart).
+            _log(f"PROGRESS:{done_count}/{total_lines}")
+            _log(f"  chunk {chunk_idx + 1}/{n_chunks} — {dt:.1f}s total, "
+                 f"{dt/len(tokens_batch):.2f}s/seg")
+
+            for (ti, li, _), result in zip(chunk, results):
+                # Le premier token de sortie est le tgt_lang (token de contrôle) → ignorer.
+                output_tokens = result.hypotheses[0][1:]
+                translated[(ti, li)] = sp.decode(output_tokens)
+
+        total_dt = time.monotonic() - t_batch_start
+        _log(f"translate_batch terminé — {total_dt:.1f}s pour {total_lines} lignes "
+             f"({total_dt/total_lines:.2f}s/seg moyen)")
 
     # ── Reconstruction ────────────────────────────────────────────────────────
     output = []

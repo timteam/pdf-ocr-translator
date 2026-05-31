@@ -20,6 +20,7 @@ const int _detectDpi = 150;
 const double _phaseRender = 0.10;
 const double _phaseOCR = 0.35;
 const double _phaseWrite = 0.10;
+const double _phaseTranslation = 1.0 - _phaseRender - _phaseOCR - _phaseWrite;
 
 // Fonction top-level requise par compute() : s'exécute dans un isolate séparé.
 // Reçoit les données brutes d'une page, génère et retourne les bytes PDF.
@@ -318,6 +319,15 @@ class PDFProcessingService {
           textBlocks.map((b) => b.text).toList(),
           sourceLanguage,
           targetLanguage,
+          onTranslationProgress: (done, total) {
+            onProgress(ProcessingUpdate(
+              currentPage: pageIndex,
+              totalPages: pageCount,
+              stepName: 'Traduction ($done/$total lignes)…',
+              stepProgress: _phaseRender + _phaseOCR +
+                  (total > 0 ? done / total : 0.0) * _phaseTranslation,
+            ));
+          },
         );
         final blocks = <Map<String, dynamic>>[];
         for (int i = 0; i < textBlocks.length; i++) {

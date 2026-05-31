@@ -133,11 +133,16 @@ class TranslationService {
   }
 
   /// Traduit un batch de textes en un seul appel Python.
+  ///
+  /// [onTranslationProgress] est appelé après chaque chunk Python avec le nombre
+  /// de lignes traitées et le total. Permet d'animer une barre de progression
+  /// pendant la traduction sans relancer le process.
   Future<List<String>> translateBatch(
     List<String> texts,
     String fromLanguage,
-    String toLanguage,
-  ) async {
+    String toLanguage, {
+    void Function(int done, int total)? onTranslationProgress,
+  }) async {
     if (fromLanguage == toLanguage) return List.from(texts);
     if (texts.isEmpty) return [];
 
@@ -156,6 +161,7 @@ class TranslationService {
         uncachedTexts,
         fromLanguage,
         toLanguage,
+        onTranslationProgress: onTranslationProgress,
       );
 
       for (var j = 0; j < uncachedIndices.length; j++) {
@@ -199,8 +205,9 @@ class TranslationService {
   Future<List<String>> _translateDirect(
     List<String> texts,
     String src,
-    String tgt,
-  ) async {
+    String tgt, {
+    void Function(int done, int total)? onTranslationProgress,
+  }) async {
     final srcCode = _nllbCodes[src] ?? 'eng_Latn';
     final tgtCode = _nllbCodes[tgt] ?? 'fra_Latn';
     final modelDir = _getModelDir(_modelDirName);
@@ -212,7 +219,8 @@ class TranslationService {
 
     logger.i('Traduction NLLB: $src ($srcCode) → $tgt ($tgtCode) | ${texts.length} segment(s)');
     try {
-      return await _callPython(texts, modelDir, srcCode, tgtCode);
+      return await _callPython(texts, modelDir, srcCode, tgtCode,
+          onTranslationProgress: onTranslationProgress);
     } catch (e) {
       logger.w('Traduction $src→$tgt échouée ($e) — textes conservés.');
       return List.from(texts);
@@ -247,8 +255,9 @@ class TranslationService {
     List<String> texts,
     String modelDir,
     String srcCode,
-    String tgtCode,
-  ) async {
+    String tgtCode, {
+    void Function(int done, int total)? onTranslationProgress,
+  }) async {
     final logPrefix = '[$srcCode→$tgtCode]';
     final args = [_scriptPath, modelDir, srcCode, tgtCode];
 
@@ -275,6 +284,18 @@ class TranslationService {
         if (l.isNotEmpty) {
           logger.i('$logPrefix py: $l');
           stderrBuffer.writeln(l);
+          // "PROGRESS:done/total" émis par nllb_translate.py après chaque chunk.
+          if (l.startsWith('PROGRESS:')) {
+            final rest = l.substring(9);
+            final slash = rest.indexOf('/');
+            if (slash > 0) {
+              final done = int.tryParse(rest.substring(0, slash));
+              final total = int.tryParse(rest.substring(slash + 1));
+              if (done != null && total != null) {
+                onTranslationProgress?.call(done, total);
+              }
+            }
+          }
         }
       }
     });
