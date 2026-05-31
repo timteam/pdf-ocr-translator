@@ -98,10 +98,11 @@ npm-debug.log*
 # Project specific
 output/
 translations_cache/
-models/
 
 # Modèles de traduction (fichiers générés — ne pas commiter)
 # Les règles de contenu sont dans flutter_app/assets/translation_models/.gitignore
+assets/models/
+assets/translation_models/
 translation_models/
 snap/translation_models/
 !flutter_app/assets/translation_models/
