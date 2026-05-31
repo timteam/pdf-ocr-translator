@@ -239,12 +239,11 @@ class PDFProcessingService {
       final fontBytes = fontData.buffer.asUint8List();
 
       for (int pageIndex = 1; pageIndex <= pageCount; pageIndex++) {
-        final sourceLanguage = pageLanguages
-            .firstWhere(
-              (pl) => pl.pageNumber == pageIndex,
-              orElse: () => PageLanguage(pageNumber: pageIndex, detectedCode: 'en'),
-            )
-            .effectiveCode;
+        final pageLang = pageLanguages.firstWhere(
+          (pl) => pl.pageNumber == pageIndex,
+          orElse: () => PageLanguage(pageNumber: pageIndex, detectedCode: 'en'),
+        );
+        final sourceLanguage = pageLang.effectiveCode;
 
         // Étape 1 — Rendu
         await _emit(onProgress, ProcessingUpdate(
@@ -252,8 +251,18 @@ class PDFProcessingService {
           stepName: 'Rendu de la page en image…',
           stepProgress: 0.0,
         ));
-        final imageFile = await _renderPageToImage(pdfFile, pageIndex, tempDir);
-        tempImages.add(imageFile.path);
+        final renderedFile = await _renderPageToImage(pdfFile, pageIndex, tempDir);
+        tempImages.add(renderedFile.path);
+
+        // Rotation manuelle demandée par l'utilisateur (0 = aucune)
+        final File imageFile;
+        if (pageLang.rotation != 0) {
+          imageFile = await _applyRotation(renderedFile, pageLang.rotation, tempDir);
+          tempImages.add(imageFile.path);
+          logger.i('Page $pageIndex: rotation ${pageLang.rotation}° CCW appliquée');
+        } else {
+          imageFile = renderedFile;
+        }
 
         final imageBytes = await imageFile.readAsBytes();
         logger.i('Page $pageIndex: image rendue — ${imageBytes.length ~/ 1024} Ko, chemin: ${imageFile.path}');
@@ -267,8 +276,12 @@ class PDFProcessingService {
         final ptHeight = decoded.height * 72.0 / _renderDpi;
         final pixelToPoint = 72.0 / _renderDpi;
 
-        // Étape 2 — Essai texte embarqué (PDF avec couche texte) puis OCR
-        final embedded = await _tryEmbeddedText(pdfFile, pageIndex, _renderDpi);
+        // Étape 2 — Essai texte embarqué (PDF avec couche texte) puis OCR.
+        // Si l'utilisateur a appliqué une rotation, on saute le texte embarqué
+        // (ses coordonnées seraient dans le repère original, pas le repère rotaté).
+        final embedded = pageLang.rotation == 0
+            ? await _tryEmbeddedText(pdfFile, pageIndex, _renderDpi)
+            : null;
         final List<OCRTextBlock> textBlocks;
         if (embedded != null) {
           logger.i('Page $pageIndex: texte embarqué utilisé (${embedded.length} blocs pdftotext)');
@@ -381,6 +394,20 @@ class PDFProcessingService {
         try { await File(path).delete(); } catch (_) {}
       }
     }
+  }
+
+  // Applique une rotation CCW (0/90/180/270°) à une image et écrit un nouveau fichier.
+  Future<File> _applyRotation(File imageFile, int degrees, Directory tempDir) async {
+    final bytes = await imageFile.readAsBytes();
+    final source = img.decodeImage(bytes);
+    if (source == null) return imageFile;
+    final rotated = img.copyRotate(source, angle: degrees.toDouble());
+    final outPath = p.join(
+      tempDir.path,
+      'rot${degrees}_${p.basename(imageFile.path)}',
+    );
+    await File(outPath).writeAsBytes(img.encodePng(rotated));
+    return File(outPath);
   }
 
   // Tente d'extraire le texte embarqué via pdftotext -bbox.

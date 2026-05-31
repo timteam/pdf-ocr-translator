@@ -208,6 +208,15 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
     }
   }
 
+  void _rotatePage(int pageNumber, int deltaDeg) {
+    setState(() {
+      final idx = _pageLanguages.indexWhere((p) => p.pageNumber == pageNumber);
+      if (idx < 0) return;
+      final pl = _pageLanguages[idx];
+      _pageLanguages[idx] = pl.withRotation((pl.rotation + deltaDeg + 360) % 360);
+    });
+  }
+
   void _skipAffectedPages() {
     setState(() {
       _pageLanguages = _pageLanguages.map((pl) {
@@ -421,67 +430,112 @@ class _ProcessingScreenState extends State<ProcessingScreen> {
         ? TextStyle(color: Colors.grey.shade500, fontStyle: FontStyle.italic)
         : null;
 
+    // Ligne de sous-titre : langue + indicateur de rotation si active
+    Widget subtitleWidget;
+    if (pl.skipTranslation) {
+      subtitleWidget = Text('Non traduit', style: textStyle);
+    } else {
+      final langLine = pl.isOverridden
+          ? Text('$langName  ·  détecté : $detectedName',
+              style: const TextStyle(color: AppTheme.primaryColor, fontSize: 12))
+          : Text(langName);
+      subtitleWidget = pl.rotation != 0
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                langLine,
+                Text('↺ ${pl.rotation}°',
+                    style: TextStyle(fontSize: 11, color: AppTheme.primaryColor)),
+              ],
+            )
+          : langLine;
+    }
+
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       leading: GestureDetector(
         onTap: pl.thumbnailPath != null
             ? () => _showPageZoom(context, pl.thumbnailPath!)
             : null,
-        child: _buildThumbnail(pl.thumbnailPath, dim: isGray),
+        child: _buildThumbnail(pl.thumbnailPath, dim: isGray, rotation: pl.rotation),
       ),
       title: Text('Page ${pl.pageNumber}',
           style: TextStyle(fontWeight: FontWeight.w600).merge(textStyle)),
-      subtitle: pl.skipTranslation
-          ? Text('Non traduit', style: textStyle)
-          : pl.isOverridden
-              ? Text('$langName  ·  détecté : $detectedName',
-                  style: TextStyle(color: AppTheme.primaryColor, fontSize: 12))
-              : Text(langName),
+      subtitle: subtitleWidget,
       trailing: _buildPageTrailing(pl, missing),
     );
   }
 
-  Widget? _buildPageTrailing(PageLanguage pl, Set<String> missing) {
-    if (pl.skipTranslation) {
-      return Tooltip(
-        message: 'Traduction ignorée (modèle absent)',
-        child: Icon(Icons.block, size: 18, color: Colors.grey.shade400),
-      );
-    }
-    final hasWarning = missing.isNotEmpty;
-    final hasEdit = pl.isOverridden;
-    if (!hasWarning && !hasEdit) return null;
+  Widget _buildPageTrailing(PageLanguage pl, Set<String> missing) {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (hasEdit)
-          const Icon(Icons.edit, size: 16, color: AppTheme.primaryColor),
-        if (hasEdit && hasWarning) const SizedBox(width: 4),
-        if (hasWarning)
+        // Indicateurs existants
+        if (pl.skipTranslation)
           Tooltip(
-            message: 'Modèle manquant : ${missing.join(", ")}',
-            child: const Icon(Icons.warning_amber, size: 18, color: Colors.orange),
-          ),
+            message: 'Traduction ignorée (modèle absent)',
+            child: Icon(Icons.block, size: 16, color: Colors.grey.shade400),
+          )
+        else ...[
+          if (pl.isOverridden)
+            const Icon(Icons.edit, size: 14, color: AppTheme.primaryColor),
+          if (missing.isNotEmpty)
+            Tooltip(
+              message: 'Modèle manquant : ${missing.join(", ")}',
+              child: const Icon(Icons.warning_amber, size: 16, color: Colors.orange),
+            ),
+        ],
+        const SizedBox(width: 2),
+        // Boutons de rotation manuelle
+        IconButton(
+          icon: const Icon(Icons.rotate_left, size: 18),
+          onPressed: () => _rotatePage(pl.pageNumber, -90),
+          tooltip: '−90°',
+          padding: const EdgeInsets.all(4),
+          constraints: const BoxConstraints(),
+          visualDensity: VisualDensity.compact,
+        ),
+        IconButton(
+          icon: const Icon(Icons.rotate_right, size: 18),
+          onPressed: () => _rotatePage(pl.pageNumber, 90),
+          tooltip: '+90°',
+          padding: const EdgeInsets.all(4),
+          constraints: const BoxConstraints(),
+          visualDensity: VisualDensity.compact,
+        ),
       ],
     );
   }
 
-  Widget _buildThumbnail(String? path, {bool dim = false}) {
-    Widget img;
+  Widget _buildThumbnail(String? path, {bool dim = false, int rotation = 0}) {
+    final quarterTurns = (rotation ~/ 90) % 4;
+    final isOdd = quarterTurns % 2 != 0; // 90° ou 270° : dimensions inversées
+
+    Widget content;
     if (path != null) {
-      img = ClipRRect(
+      content = ClipRRect(
         borderRadius: BorderRadius.circular(4),
-        child: Image.file(
-          File(path),
-          height: 52, width: 37,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => const _PageIcon(),
+        child: RotatedBox(
+          quarterTurns: quarterTurns,
+          child: Image.file(
+            File(path),
+            // Inversion largeur/hauteur pour 90°/270° afin de remplir
+            // correctement le conteneur portrait 37×52
+            height: isOdd ? 37.0 : 52.0,
+            width:  isOdd ? 52.0 : 37.0,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const _PageIcon(),
+          ),
         ),
       );
     } else {
-      img = const _PageIcon();
+      content = const _PageIcon();
     }
-    return dim ? Opacity(opacity: 0.35, child: img) : img;
+    return SizedBox(
+      width: 37, height: 52,
+      child: dim ? Opacity(opacity: 0.35, child: content) : content,
+    );
   }
 
   Widget _buildMissingModelsBanner() {
