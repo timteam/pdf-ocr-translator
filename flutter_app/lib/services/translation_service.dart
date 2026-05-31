@@ -53,6 +53,10 @@ class TranslationService {
 
   static const _modelDirName = 'nllb-200-distilled-600M';
 
+  // Incrémenter quand le script Python ou les paramètres de traduction changent.
+  // Les entrées de cache avec un préfixe différent sont ignorées (invalidation).
+  static const _cacheVersion = 'v2';
+
   // ============================================================================
   // API STATIQUE — vérification des modèles sans instanciation
   // ============================================================================
@@ -363,7 +367,7 @@ class TranslationService {
   // ============================================================================
 
   String _buildCacheKey(String from, String to, String text) {
-    return '$from→$to:${text.hashCode}';
+    return '$_cacheVersion:$from→$to:${text.hashCode}';
   }
 
   Future<void> _loadCache() async {
