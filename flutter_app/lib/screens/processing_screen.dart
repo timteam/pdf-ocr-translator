@@ -1116,9 +1116,9 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      RadioListTile<bool>(
+                      const RadioListTile<bool>(
                         value: true,
-                        title: const Text('Même langue pour tout le document'),
+                        title: Text('Même langue pour tout le document'),
                       ),
                       if (_globalMode)
                         Padding(
@@ -1146,9 +1146,9 @@ class _CustomizationSheetState extends State<_CustomizationSheet> {
                           ),
                         ),
                       const SizedBox(height: 4),
-                      RadioListTile<bool>(
+                      const RadioListTile<bool>(
                         value: false,
-                        title: const Text('Personnaliser page par page'),
+                        title: Text('Personnaliser page par page'),
                       ),
                       if (!_globalMode) ...[
                         const SizedBox(height: 4),
