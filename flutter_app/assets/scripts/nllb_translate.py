@@ -12,10 +12,46 @@ Usage : python3 nllb_translate.py <model_dir> <src_lang> <tgt_lang>
 """
 import sys
 import os
+import re
 import time
 
+# ── Détection CPU ─────────────────────────────────────────────────────────────
+
+def _physical_cores() -> int:
+    """Cœurs physiques (hors hyperthreading). HT nuit aux ops matricielles."""
+    try:
+        with open('/proc/cpuinfo') as f:
+            content = f.read()
+        ids = set(re.findall(r'^core id\s*:\s*(\d+)', content, re.MULTILINE))
+        if ids:
+            return max(1, len(ids))
+    except OSError:
+        pass
+    return max(1, (os.cpu_count() or 4) // 2)
+
+def _best_compute_type() -> str:
+    """
+    CTranslate2 INT8 est efficace avec AVX2 (256-bit SIMD).
+    Sans AVX2 (SSE4 uniquement), INT8 tombe sur du code 128-bit très lent.
+    float32 avec AVX/SSE4 est alors plus rapide malgré le volume de données supérieur.
+    """
+    try:
+        with open('/proc/cpuinfo') as f:
+            flags = f.read()
+        if 'avx512' in flags:
+            return 'int8'
+        if 'avx2' in flags:
+            return 'int8'
+        # SSE4 seulement (ex: Ivy Bridge i7-3xxx) → float32 plus efficace
+        return 'float32'
+    except OSError:
+        return 'auto'
+
+_N_CORES  = _physical_cores()          # cœurs physiques réels
+_COMPUTE  = _best_compute_type()       # type de calcul adapté au CPU
+
 # Doit être positionné avant tout import de numpy/ctranslate2.
-_N_THREADS = "4"
+_N_THREADS = str(_N_CORES)
 os.environ.setdefault("OMP_NUM_THREADS",      _N_THREADS)
 os.environ.setdefault("MKL_NUM_THREADS",      _N_THREADS)
 os.environ.setdefault("OPENBLAS_NUM_THREADS", _N_THREADS)
@@ -25,7 +61,6 @@ import gc
 
 # Nombre de lignes par appel translate_batch. Réduit le gel en produisant des
 # résultats intermédiaires et permet de rapporter la progression à Dart via stderr.
-# Valeur basse = mémoire de pointe réduite + progression plus fréquente.
 _CHUNK_SIZE = 16
 
 
@@ -60,12 +95,13 @@ def main():
     sp = spm.SentencePieceProcessor()
     sp.load(spm_path)
 
-    _log("ctranslate2.Translator chargement…")
+    _log(f"ctranslate2.Translator chargement… (cores={_N_CORES}, compute={_COMPUTE})")
     translator = ctranslate2.Translator(
         model_dir,
         device="cpu",
+        compute_type=_COMPUTE,
         inter_threads=1,
-        intra_threads=int(_N_THREADS),
+        intra_threads=_N_CORES,
     )
     _log(f"Modèle chargé ({src_lang} → {tgt_lang})")
 
@@ -125,8 +161,9 @@ def main():
             results = translator.translate_batch(
                 tokens_batch,
                 target_prefix=target_prefix,
-                beam_size=2,
-                max_decoding_length=512,
+                beam_size=1,          # greedy — 2× plus rapide que beam=2
+                max_decoding_length=200,  # suffisant pour la traduction de blocs OCR
+                max_batch_size=8,     # limite la mémoire interne CT2 par appel
             )
             dt = time.monotonic() - t0
             done_count += len(chunk)
