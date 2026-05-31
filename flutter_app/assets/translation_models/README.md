@@ -63,7 +63,7 @@ chmod +x scripts/prepare_translation_models.sh
 ./scripts/prepare_translation_models.sh --clean
 ```
 
-Le script télécharge `michaelfeil/ct2fast-nllb-200-distilled-600M` (~500 MB) —
+Le script télécharge `Serkan007/CTranslate2-nllb-200-int8` (~500 MB) —
 modèle CTranslate2 INT8 pré-converti. Pas besoin de torch ni transformers.
 
 ## Notes

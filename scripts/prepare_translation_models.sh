@@ -31,7 +31,7 @@ PIP_PYZ=""
 
 MODEL_KEY="nllb-200-distilled-600M"
 # Modèle CTranslate2 INT8 pré-converti — évite torch + transformers
-MODEL_HF="michaelfeil/ct2fast-nllb-200-distilled-600M"
+MODEL_HF="Serkan007/CTranslate2-nllb-200-int8"
 
 # ─── Aide ─────────────────────────────────────────────────────────────────────
 usage() {
@@ -132,7 +132,7 @@ _download_model() {
   local hf_id="$1" dest="$2"
   echo "  Téléchargement $hf_id (~500 Mo)…"
   _HF_ID="$hf_id" _DEST="$dest" \
-  PYTHONPATH="$PKGS_DIR" HF_HUB_ENABLE_HF_TRANSFER=1 \
+  PYTHONPATH="$PKGS_DIR" HF_XET_HIGH_PERFORMANCE=1 \
   python3 - <<'PYEOF'
 import os
 from huggingface_hub import snapshot_download

@@ -159,7 +159,7 @@ Python, les wheels et poppler ne sont **pas** à installer sur la machine de bui
 Le modèle **NLLB-200-distilled-600M** est téléchargé directement au format **CTranslate2 INT8 pré-converti** (~500 MB). Aucun torch ni transformers requis.
 
 ```
-michaelfeil/ct2fast-nllb-200-distilled-600M (~500 Mo, CT2 INT8 pré-converti)
+Serkan007/CTranslate2-nllb-200-int8 (~500 Mo, CT2 INT8 pré-converti)
         │
   [prepare_translation_models.sh]   ← téléchargement direct, one-shot dev
         │
