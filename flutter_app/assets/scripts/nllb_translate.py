@@ -30,22 +30,11 @@ def _physical_cores() -> int:
     return max(1, (os.cpu_count() or 4) // 2)
 
 def _best_compute_type() -> str:
-    """
-    CTranslate2 INT8 est efficace avec AVX2 (256-bit SIMD).
-    Sans AVX2 (SSE4 uniquement), INT8 tombe sur du code 128-bit très lent.
-    float32 avec AVX/SSE4 est alors plus rapide malgré le volume de données supérieur.
-    """
-    try:
-        with open('/proc/cpuinfo') as f:
-            flags = f.read()
-        if 'avx512' in flags:
-            return 'int8'
-        if 'avx2' in flags:
-            return 'int8'
-        # SSE4 seulement (ex: Ivy Bridge i7-3xxx) → float32 plus efficace
-        return 'float32'
-    except OSError:
-        return 'auto'
+    # Le modèle Serkan007 est calibré pour INT8 : toute autre valeur (float32,
+    # auto) fausse les distributions de probabilité et produit des sorties
+    # corrompues (tokens de langue NLLB dans le texte, boucles de répétition).
+    # INT8 est lent sur Ivy Bridge (pas d'AVX2) mais c'est le seul mode correct.
+    return 'int8'
 
 _N_CORES  = _physical_cores()          # cœurs physiques réels
 _COMPUTE  = _best_compute_type()       # type de calcul adapté au CPU
@@ -161,9 +150,11 @@ def main():
             results = translator.translate_batch(
                 tokens_batch,
                 target_prefix=target_prefix,
-                beam_size=1,          # greedy — 2× plus rapide que beam=2
-                max_decoding_length=200,  # suffisant pour la traduction de blocs OCR
-                max_batch_size=8,     # limite la mémoire interne CT2 par appel
+                beam_size=2,
+                max_decoding_length=200,
+                max_batch_size=8,
+                repetition_penalty=1.3,   # pénalise les tokens déjà générés
+                no_repeat_ngram_size=4,   # interdit de répéter un 4-gram
             )
             dt = time.monotonic() - t0
             done_count += len(chunk)
