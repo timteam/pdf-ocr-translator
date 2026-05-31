@@ -40,8 +40,6 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/images/
-    - assets/icons/
     - assets/fonts/
     - assets/models/
     - assets/models/onnx/

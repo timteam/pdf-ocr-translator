@@ -105,45 +105,35 @@ Map<String, dynamic> _deskewOnly(Uint8List srcBytes) {
 }
 
 // ─── Correction d'inclinaison (deskew) ────────────────────────────────────────
-// Recherche en 3 passes optimisées pour performance/qualité :
-//   1. ±85° step 10° sur image 1/16 — repère le cadrant (17 itérations vs 35)
-//   2. ±5°  step 0.5° sur image 1/8  — affine autour du meilleur (21 itérations vs 54)
-//   3. ±0.5° step 0.1° sur image 1/8 — précision finale (11 itérations vs 21)
-// Gain estimé : ~60-70% plus rapide avec perte de précision négligeable
+// Corrige uniquement les petits défauts de numérisation (< ±10°).
+// Les rotations de page (90°/180°/270°) sont gérées manuellement par l'utilisateur.
+// Recherche en 3 passes :
+//   1. ±10° step 2° sur image 1/8   — repère la zone (11 itérations)
+//   2. ±2°  step 0.5° sur image 1/8 — affine autour du meilleur (9 itérations)
+//   3. ±0.5° step 0.1° sur image 1/8 — précision finale (11 itérations)
 ({img.Image image, double angle, int prepW, int prepH}) _ppDeskew(
     img.Image binary, {List<String>? logs}) {
-  // Passe 1 — très grossière sur image 1/16 (rapide, tolérant les grands angles)
-  const tinyDiv = 16;
-  final tiny = img.copyResize(
-    binary,
-    width: max(1, binary.width ~/ tinyDiv),
-    height: max(1, binary.height ~/ tinyDiv),
-    interpolation: img.Interpolation.average,
-  );
-  tiny.backgroundColor = img.ColorRgb8(255, 255, 255);
-
-  double bestAngle = 0.0;
-  double bestScore = -1.0;
-  // Step 10° au lieu de 5° : 17 itérations vs 35
-  for (double a = -85.0; a <= 85.0; a += 10.0) {
-    final score = _ppProjectionVariance(img.copyRotate(tiny, angle: a));
-    if (score > bestScore) { bestScore = score; bestAngle = a; }
-  }
-
-  // Passe 2 — intermédiaire sur image 1/8 (±5° autour du meilleur candidat)
   const sampleDiv = 8;
   final small = img.copyResize(
     binary,
-    width: binary.width ~/ sampleDiv,
-    height: binary.height ~/ sampleDiv,
+    width: max(1, binary.width ~/ sampleDiv),
+    height: max(1, binary.height ~/ sampleDiv),
     interpolation: img.Interpolation.average,
   );
   small.backgroundColor = img.ColorRgb8(255, 255, 255);
 
+  // Passe 1 — plage ±10° step 2°
+  double bestAngle = 0.0;
+  double bestScore = -1.0;
+  for (double a = -10.0; a <= 10.0; a += 2.0) {
+    final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
+    if (score > bestScore) { bestScore = score; bestAngle = a; }
+  }
+
+  // Passe 2 — ±2° autour du meilleur, step 0.5°
   double medScore = -1.0;
   double medAngle = bestAngle;
-  // Step 0.5° au lieu de 0.3° : 21 itérations vs 54
-  for (double a = bestAngle - 5.0; a <= bestAngle + 5.0; a += 0.5) {
+  for (double a = bestAngle - 2.0; a <= bestAngle + 2.0; a += 0.5) {
     final score = _ppProjectionVariance(img.copyRotate(small, angle: a));
     if (score > medScore) { medScore = score; medAngle = a; }
   }
