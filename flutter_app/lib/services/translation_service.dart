@@ -33,7 +33,7 @@ class TranslationService {
   final Map<String, String> _cache = {};
 
   // Incrémenter quand le script Python ou le format de modèle change.
-  static const _cacheVersion = 'v4';
+  static const _cacheVersion = 'v5';
 
   // ============================================================================
   // API STATIQUE — vérification des modèles sans instanciation

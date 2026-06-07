@@ -44,37 +44,34 @@ import unicodedata
 
 _CHUNK_SIZE = 32  # Opus-MT est bien plus léger que NLLB — chunks plus grands
 
-# Caractères Unicode non rendus par les polices PDF standard
-_INVISIBLE = (
-    '­'  # SOFT HYPHEN
-    '​'  # ZERO WIDTH SPACE
-    '‌'  # ZERO WIDTH NON-JOINER
-    '‍'  # ZERO WIDTH JOINER
-    '⁠'  # WORD JOINER
-    '﻿'  # BOM / ZERO WIDTH NO-BREAK SPACE
-    '⁡''⁢''⁣''⁤'  # invisible math operators
-)
-_SPACE_VARIANTS = (
-    ' '  # NO-BREAK SPACE
-    '·'  # MIDDLE DOT (artefact SentencePiece Opus-MT)
-    ' '  # THIN SPACE
-    ' '  # NARROW NO-BREAK SPACE
-    ' '  # FIGURE SPACE
-    ' '  # PUNCTUATION SPACE
-    ' '  # MEDIUM MATHEMATICAL SPACE
-    '　'  # IDEOGRAPHIC SPACE
-)
+# Caractères invisibles à supprimer (escapes Unicode explicites pour robustesse).
+_INVISIBLE_CHARS = frozenset({
+    '\u00ad',  # SOFT HYPHEN
+    '\u200b',  # ZERO WIDTH SPACE
+    '\u200c',  # ZERO WIDTH NON-JOINER
+    '\u200d',  # ZERO WIDTH JOINER
+    '\u2060',  # WORD JOINER
+    '\ufeff',  # BOM / ZERO WIDTH NO-BREAK SPACE
+    '\u2061', '\u2062', '\u2063', '\u2064',  # invisible math operators
+})
+
+# ▁ U+2581 : marqueur de frontière de mot SentencePiece qui peut fuir du décodage
+_SP_BOUNDARY = '\u2581'
+
 
 def _clean(text: str) -> str:
     """Normalise le texte pour éviter les caractères non supportés par les polices PDF."""
     text = unicodedata.normalize('NFKC', text)
-    for ch in _INVISIBLE:
-        text = text.replace(ch, '')
-    for ch in _SPACE_VARIANTS:
-        text = text.replace(ch, ' ')
-    # Collapse les espaces multiples
-    import re as _re
-    text = _re.sub(r' {2,}', ' ', text)
+    # Supprime les caractères invisibles
+    text = ''.join(ch for ch in text if ch not in _INVISIBLE_CHARS)
+    # Remplace ▁ (marqueur SentencePiece) par une espace
+    text = text.replace(_SP_BOUNDARY, ' ')
+    # Normalise toutes les catégories Unicode d'espace (Zs/Zl/Zp) → espace simple
+    text = ''.join(
+        ' ' if unicodedata.category(ch) in ('Zs', 'Zl', 'Zp') else ch
+        for ch in text
+    )
+    text = re.sub(r' {2,}', ' ', text)
     return text.strip()
 
 

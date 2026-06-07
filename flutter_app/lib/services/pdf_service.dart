@@ -28,16 +28,18 @@ const _rtlLanguages = {'ar', 'he', 'fa', 'ur'};
 
 // Recherche binaire du plus grand corps de texte tel que le texte
 // tient dans bWidth × bHeight sans déborder.
-// Roboto : largeur moy. ≈ fs×0.50, interligne ≈ fs×1.30.
+// Roboto : largeur moy. ≈ fs×0.55, interligne ≈ fs×1.35.
+// Plafond à 14 pt — au-delà, le texte traduit (souvent plus long que l'original)
+// déborde presque toujours pour des blocs de taille standard.
 double _estimateFontSize(double bWidth, double bHeight, int charCount) {
-  if (charCount == 0) return 10.0;
-  double lo = 4.0, hi = 20.0;
-  for (int i = 0; i < 12; i++) {
+  if (charCount == 0) return 8.0;
+  double lo = 4.0, hi = 14.0;
+  for (int i = 0; i < 14; i++) {
     final mid = (lo + hi) / 2;
-    final lines = (charCount * mid * 0.50 / bWidth).ceil();
-    if (lines * mid * 1.30 <= bHeight) lo = mid; else hi = mid;
+    final lines = (charCount * mid * 0.55 / bWidth).ceil();
+    if (lines * mid * 1.35 <= bHeight) lo = mid; else hi = mid;
   }
-  return lo;
+  return lo.clamp(4.0, 14.0);
 }
 
 Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
@@ -68,6 +70,7 @@ Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
           final bHeight = b['height'] as double;
           final text = b['text'] as String;
           final fontSize = _estimateFontSize(bWidth, bHeight, text.length);
+          final maxLines = (bHeight / (fontSize * 1.35)).floor().clamp(1, 50);
           return pw.Positioned(
             left: b['left'] as double,
             top: b['top'] as double,
@@ -81,6 +84,8 @@ Future<Uint8List> _buildPagePdfBytes(Map<String, dynamic> data) async {
                     text,
                     style: pw.TextStyle(fontSize: fontSize, color: PdfColors.black, font: font),
                     textAlign: textAlign,
+                    maxLines: maxLines,
+                    overflow: pw.TextOverflow.clip,
                   ),
                 ),
               ),

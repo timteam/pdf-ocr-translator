@@ -240,10 +240,12 @@ def result_to_blocks(result, min_conf=0.5):
 #      (utile pour le texte vertical japonais fragmenté).
 # =============================================================================
 
-def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio):
+def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None):
     """
     Fusionne les blocs proches sur un axe donné.
     axis='h' → même ligne (merge horizontal) ; axis='v' → même colonne (merge vertical).
+    max_gap_px : limite absolue du gap en pixels (indépendante du ratio).
+    Utilise les bornes courantes du groupe (chain merging) plutôt que le seul bloc ancre.
     """
     if not blocks:
         return blocks
@@ -274,27 +276,39 @@ def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio):
             continue
         group = [b1]
         used[i] = True
-        s1 = primary_size(b1)
+
+        # Bornes courantes du groupe (chain merging : compare contre le bord du groupe,
+        # pas seulement contre le bloc ancre)
+        grp_pri_lo  = primary_lo(b1)
+        grp_pri_hi  = primary_hi(b1)
+        grp_sec_hi  = secondary_hi(b1)
 
         for j in range(i + 1, len(sorted_blocks)):
             if used[j]:
                 continue
             b2 = sorted_blocks[j]
             s2 = primary_size(b2)
-            min_s = min(s1, s2)
+            grp_pri_size = grp_pri_hi - grp_pri_lo
+            min_s = min(grp_pri_size, s2)
 
-            # Chevauchement sur l'axe principal (même ligne / même colonne)
-            overlap = min(primary_hi(b1), primary_hi(b2)) - max(primary_lo(b1), primary_lo(b2))
+            # Chevauchement sur l'axe principal (contre les bornes actuelles du groupe)
+            overlap = min(grp_pri_hi, primary_hi(b2)) - max(grp_pri_lo, primary_lo(b2))
             if overlap < min_s * overlap_min_ratio:
                 continue
 
-            # Proximité sur l'axe secondaire (gap entre les deux boîtes)
-            gap = secondary_lo(b2) - secondary_hi(b1)
+            # Gap sur l'axe secondaire (contre le bord courant du groupe)
+            gap = secondary_lo(b2) - grp_sec_hi
             if gap < 0 or gap > min_s * gap_max_ratio:
+                continue
+            if max_gap_px is not None and gap > max_gap_px:
                 continue
 
             group.append(b2)
             used[j] = True
+            # Étend les bornes du groupe pour le prochain candidat
+            grp_sec_hi = max(grp_sec_hi, secondary_hi(b2))
+            grp_pri_lo = min(grp_pri_lo, primary_lo(b2))
+            grp_pri_hi = max(grp_pri_hi, primary_hi(b2))
 
         groups.append(group)
 
@@ -321,9 +335,17 @@ def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio):
 def layout_analysis(blocks):
     """
     Applique les deux passes de fusion spatiale et filtre les boîtes trop petites.
-    Paramètres conservateurs pour ne pas fusionner du texte de colonnes différentes.
+
+    Tuning :
+      MIN_AREA      : 2000 px² → élimine fragments sub-caractère à 600 DPI
+                      (un caractère japonais ~50×50 px = 2500 px²)
+      h gap_max     : 1.5 × hauteur, plafonné à 150 px (~6 mm à 600 DPI)
+                      → évite de fusionner des colonnes séparées
+      h overlap_min : 0.4 → les deux blocs doivent partager ≥ 40 % de hauteur
+      v gap_max     : 1.0 × largeur, plafonné à 80 px (~3 mm à 600 DPI)
+      v overlap_min : 0.3 → chevauchement horizontal ≥ 30 % pour texte vertical
     """
-    MIN_AREA = 800  # px² — élimine les artéfacts de détection sub-caractère
+    MIN_AREA = 2000  # px² (était 800)
 
     filtered = [b for b in blocks
                 if (b['right'] - b['left']) * (b['bottom'] - b['top']) >= MIN_AREA]
@@ -331,14 +353,16 @@ def layout_analysis(blocks):
     # Passe 1 : fusion horizontale (même ligne de texte)
     merged = _merge_pass(filtered,
                          axis='h',
-                         gap_max_ratio=1.5,     # gap ≤ 1,5 × hauteur
-                         overlap_min_ratio=0.4) # chevauchement vertical ≥ 40 %
+                         gap_max_ratio=1.5,
+                         overlap_min_ratio=0.4,
+                         max_gap_px=150)
 
     # Passe 2 : fusion verticale (texte vertical japonais, listes)
     merged = _merge_pass(merged,
                          axis='v',
-                         gap_max_ratio=1.0,     # gap ≤ 1,0 × largeur
-                         overlap_min_ratio=0.3) # chevauchement horizontal ≥ 30 %
+                         gap_max_ratio=1.0,
+                         overlap_min_ratio=0.3,
+                         max_gap_px=80)
 
     n_in  = len(blocks)
     n_out = len(merged)
