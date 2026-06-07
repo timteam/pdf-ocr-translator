@@ -4,89 +4,135 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-// ─── Dépôt HuggingFace hébergeant NLLB-200-distilled-600M (CTranslate2 INT8) ─
-// Uploadez le modèle converti avec :
-//   scripts/prepare_translation_models.sh
-//   scripts/upload_models_to_hf.sh --repo OWNER/REPO --hf-token hf_...
-// Puis remplacez OWNER/nllb-ct2 par votre identifiant de dépôt.
-const String kModelHfRepo = 'Timteamteem/nllb-ct2';
+// ─── Index Argos Open Tech ────────────────────────────────────────────────────
+// Liste publique des modèles Opus-MT (CTranslate2) disponibles.
+const String _kArgosIndexUrl =
+    'https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json';
 
 class ModelDownloadService {
-  static const String _hfApiBase =
-      'https://huggingface.co/api/datasets/$kModelHfRepo/tree/main';
-  static const String _hfResolveBase =
-      'https://huggingface.co/datasets/$kModelHfRepo/resolve/main';
-
-  /// Télécharge un modèle [modelKey] depuis HuggingFace vers [targetDir].
+  /// Télécharge le modèle Opus-MT pour la paire [modelDirName] (ex : "ja-en")
+  /// depuis le CDN Argos vers [targetDir].
   ///
-  /// [onProgress] : appelé à intervalles réguliers avec (nomFichier, octetsReçus, total).
-  /// total = -1 si la taille est inconnue.
+  /// Structure attendue après téléchargement :
+  ///   [targetDir]/model/model.bin
+  ///   [targetDir]/sentencepiece.model
   ///
-  /// Lève une [Exception] en cas d'erreur réseau ou si le modèle est introuvable.
+  /// [onProgress] : appelé régulièrement avec (nomFichier, octetsReçus, total).
   static Future<void> downloadModel(
-    String modelKey, {
+    String modelDirName, {
     required String targetDir,
-    String? hfToken,
+    String? hfToken,          // ignoré (Argos est public, pas de token requis)
     void Function(String file, int received, int total)? onProgress,
   }) async {
-    final files = await _listModelFiles(modelKey, hfToken: hfToken);
-    if (files.isEmpty) {
-      throw Exception(
-        'Modèle "$modelKey" introuvable dans le dépôt "$kModelHfRepo".\n'
-        'Vérifiez que le dépôt existe et contient ce modèle.\n'
-        'Commande d\'upload : scripts/upload_models_to_hf.sh --repo $kModelHfRepo',
-      );
-    }
+    // 1. Récupérer l'index Argos
+    final index = await _fetchIndex();
 
-    await Directory(targetDir).create(recursive: true);
+    // 2. Chercher la paire demandée (format "{from}-{to}")
+    final parts = modelDirName.split('-');
+    if (parts.length < 2) throw Exception('Nom de modèle invalide : $modelDirName');
+    final from = parts.first;
+    final to = parts.last;
 
-    for (final file in files) {
-      final name = file['name'] as String;
-      final url = '$_hfResolveBase/$modelKey/$name';
-      await _downloadFile(
-        url,
-        p.join(targetDir, name),
-        hfToken: hfToken,
-        onProgress: (recv, tot) => onProgress?.call(name, recv, tot),
-      );
+    final entry = index.firstWhere(
+      (e) => e['from_code'] == from && e['to_code'] == to,
+      orElse: () => throw Exception(
+        'Modèle "$modelDirName" introuvable dans l\'index Argos.\n'
+        'Vérifiez que la paire de langues est supportée.',
+      ),
+    );
+
+    final links = entry['links'] as List<dynamic>;
+    if (links.isEmpty) throw Exception('Aucun lien pour $modelDirName');
+    final url = links.first as String;
+
+    // 3. Télécharger le .argosmodel (zip)
+    final zipPath = p.join(Directory.systemTemp.path, 'argos_$modelDirName.argosmodel');
+    await _downloadFile(
+      url,
+      zipPath,
+      onProgress: (recv, tot) => onProgress?.call(p.basename(url), recv, tot),
+    );
+
+    // 4. Extraire et installer dans targetDir
+    await _installArgosModel(zipPath, targetDir);
+    await File(zipPath).delete();
+  }
+
+  // ─── Récupération de l'index ──────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> _fetchIndex() async {
+    final client = HttpClient();
+    try {
+      final req = await client.getUrl(Uri.parse(_kArgosIndexUrl));
+      final resp = await req.close();
+      if (resp.statusCode != 200) {
+        throw Exception('Index Argos inaccessible (HTTP ${resp.statusCode})');
+      }
+      final body = await resp.transform(utf8.decoder).join();
+      return (jsonDecode(body) as List).cast<Map<String, dynamic>>();
+    } finally {
+      client.close();
     }
   }
 
-  // ─── HuggingFace API : liste des fichiers d'un répertoire ─────────────────
+  // ─── Extraction du .argosmodel ────────────────────────────────────────────
 
-  static Future<List<Map<String, dynamic>>> _listModelFiles(
-    String modelKey, {
-    String? hfToken,
-  }) async {
-    final client = HttpClient();
+  static Future<void> _installArgosModel(String zipPath, String targetDir) async {
+    final extractDir = Directory(
+      p.join(Directory.systemTemp.path, 'argos_extract_${DateTime.now().millisecondsSinceEpoch}'),
+    );
+    await extractDir.create(recursive: true);
+
     try {
-      final req = await client.getUrl(Uri.parse('$_hfApiBase/$modelKey'));
-      _setAuth(req, hfToken);
-      final resp = await req.close();
-      if (resp.statusCode == 404) return [];
-      if (resp.statusCode == 401) {
+      // unzip via le shell (disponible sur Linux)
+      final result = await Process.run(
+        'unzip', ['-q', zipPath, '-d', extractDir.path],
+      );
+      if (result.exitCode != 0) {
+        throw Exception('unzip échoué : ${result.stderr}');
+      }
+
+      // Le zip peut contenir un sous-répertoire racine — on l'aplatit
+      final entries = extractDir.listSync();
+      final Directory extractRoot;
+      if (entries.length == 1 && entries.first is Directory) {
+        extractRoot = entries.first as Directory;
+      } else {
+        extractRoot = extractDir;
+      }
+
+      // Vérification de la structure
+      final modelBin = File(p.join(extractRoot.path, 'model', 'model.bin'));
+      final spmFile = File(p.join(extractRoot.path, 'sentencepiece.model'));
+      if (!await modelBin.exists() || !await spmFile.exists()) {
         throw Exception(
-          'Authentification requise (HTTP 401).\n'
-          'Fournissez un token HuggingFace dans le champ ci-dessus.',
+          'Structure .argosmodel inattendue — model/model.bin ou sentencepiece.model manquant',
         );
       }
-      if (resp.statusCode != 200) {
-        throw Exception('API HuggingFace : HTTP ${resp.statusCode}');
+
+      // Copie dans targetDir
+      await Directory(targetDir).create(recursive: true);
+      await _copyDir(Directory(p.join(extractRoot.path, 'model')), Directory(p.join(targetDir, 'model')));
+      await spmFile.copy(p.join(targetDir, 'sentencepiece.model'));
+
+      final metaFile = File(p.join(extractRoot.path, 'metadata.json'));
+      if (await metaFile.exists()) {
+        await metaFile.copy(p.join(targetDir, 'metadata.json'));
       }
-      final body = await resp.transform(utf8.decoder).join();
-      final entries = jsonDecode(body) as List;
-      return entries
-          .where((e) => e['type'] == 'file')
-          .map<Map<String, dynamic>>((e) {
-            final path = e['path'] as String;
-            return {
-              'name': p.basename(path),
-              'size': (e['size'] as int?) ?? -1,
-            };
-          })
-          .toList();
     } finally {
-      client.close();
+      await extractDir.delete(recursive: true);
+    }
+  }
+
+  static Future<void> _copyDir(Directory src, Directory dest) async {
+    await dest.create(recursive: true);
+    await for (final entity in src.list()) {
+      final destPath = p.join(dest.path, p.basename(entity.path));
+      if (entity is File) {
+        await entity.copy(destPath);
+      } else if (entity is Directory) {
+        await _copyDir(entity, Directory(destPath));
+      }
     }
   }
 
@@ -95,7 +141,6 @@ class ModelDownloadService {
   static Future<void> _downloadFile(
     String url,
     String dest, {
-    String? hfToken,
     void Function(int received, int total)? onProgress,
   }) async {
     final client = HttpClient();
@@ -103,13 +148,12 @@ class ModelDownloadService {
       final req = await client.getUrl(Uri.parse(url))
         ..followRedirects = true
         ..maxRedirects = 8;
-      _setAuth(req, hfToken);
       final resp = await req.close();
       if (resp.statusCode != 200) {
         throw Exception('HTTP ${resp.statusCode} pour ${p.basename(url)}');
       }
 
-      final total = resp.contentLength; // -1 si inconnu
+      final total = resp.contentLength;
       int received = 0;
       int lastNotified = 0;
       const notifyEvery = 262144; // 256 Ko
@@ -124,7 +168,6 @@ class ModelDownloadService {
             onProgress?.call(received, total);
           }
         }
-        // Notification finale garantie
         onProgress?.call(received, total);
       } finally {
         await sink.flush();
@@ -132,12 +175,6 @@ class ModelDownloadService {
       }
     } finally {
       client.close();
-    }
-  }
-
-  static void _setAuth(HttpClientRequest req, String? token) {
-    if (token != null && token.isNotEmpty) {
-      req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
     }
   }
 }

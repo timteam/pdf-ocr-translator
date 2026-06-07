@@ -42,50 +42,41 @@ echo -e "${YELLOW}🔍 Vérification du modèle FastText LID...${NC}"
 echo -e "${YELLOW}🔍 Vérification des wheels Python...${NC}"
 ./scripts/download_pip_wheels.sh
 
-# ── Modèle de traduction NLLB-200 ────────────────────────────────────────────
-# nllb-200-distilled-600M doit être dans flutter_app/assets/translation_models/
-# pour être bundlé par Flutter (déclaré dans pubspec.yaml).
-# Si absent, la traduction est désactivée mais l'OCR fonctionne.
-echo -e "${YELLOW}🔍 Vérification du modèle de traduction...${NC}"
+# ── Modèles de traduction Opus-MT (Argos) ────────────────────────────────────
+# Les modèles sont dans flutter_app/assets/translation_models/{src}-{tgt}/
+# Structure : model/model.bin + sentencepiece.model
+# Si absents, la traduction est désactivée mais l'OCR fonctionne.
+echo -e "${YELLOW}🔍 Vérification des modèles de traduction Opus-MT…${NC}"
 FLUTTER_MODELS_DIR="flutter_app/assets/translation_models"
-NLLB_MODEL_BIN="$FLUTTER_MODELS_DIR/nllb-200-distilled-600M/model.bin"
 _SKIP_MODELS=false
 
-# ── Token HuggingFace ─────────────────────────────────────────────────────────
-# Cache local dans .hf_token (gitignore, chmod 600).
-# Priorité : cache > $HF_TOKEN > prompt interactif.
-HF_TOKEN_CACHE=".hf_token"
-HF_TOKEN_FOR_BUILD=""
-_hf_mask() { local t="$1"; echo "${t:0:8}****"; }
+# Compte les modèles déjà présents
+_n_present=0
+for _d in "$FLUTTER_MODELS_DIR"/*/; do
+  [[ -f "$_d/model/model.bin" ]] && ((_n_present++)) || true
+done
 
-_load_hf_token() {
-  if [[ -f "$HF_TOKEN_CACHE" ]]; then
-    HF_TOKEN_FOR_BUILD="$(< "$HF_TOKEN_CACHE")"
-    echo -e "${BLUE}🔑 Token HuggingFace : .hf_token (cache)${NC}"
-  elif [[ -n "${HF_TOKEN:-}" ]]; then
-    HF_TOKEN_FOR_BUILD="$HF_TOKEN"
-    echo -e "${BLUE}🔑 Token HuggingFace : \$HF_TOKEN${NC}"
-  fi
-}
-
-if [[ -f "$NLLB_MODEL_BIN" ]]; then
-  _size=$(du -sh "$NLLB_MODEL_BIN" | cut -f1)
-  echo -e "${GREEN}✅ nllb-200-distilled-600M présent ($_size)${NC}"
+if [[ $_n_present -gt 0 ]]; then
+  echo -e "${GREEN}✅ $_n_present modèle(s) Opus-MT présent(s)${NC}"
 
   if [[ -t 0 ]]; then
-    echo -e "${BLUE}   Modèle de traduction :${NC}"
+    echo -e "${BLUE}   Modèles de traduction :${NC}"
     echo -e "   ${BLUE}[Entrée]${NC} Garder en l'état ✅"
-    echo -e "   ${BLUE}[r]${NC}      Re-télécharger"
+    echo -e "   ${BLUE}[m]${NC}      Télécharger les manquants"
+    echo -e "   ${BLUE}[r]${NC}      Re-télécharger tous (--clean)"
     echo -e "   ${BLUE}[pg]${NC}     Purger — build OCR uniquement"
     echo ""
     read -r -p "   > " _MC
     case "${_MC,,}" in
+      m*)
+        echo -e "${GREEN}   → Téléchargement des modèles manquants${NC}"
+        ;;
       r*)
-        echo -e "${GREEN}   → Re-téléchargement forcé${NC}"
+        echo -e "${GREEN}   → Re-téléchargement complet${NC}"
         ;;
       pg*)
-        rm -f "$NLLB_MODEL_BIN"
-        echo -e "${GREEN}   ✓ Modèle purgé — build OCR uniquement${NC}"
+        find "$FLUTTER_MODELS_DIR" -name "model.bin" -delete 2>/dev/null || true
+        echo -e "${GREEN}   ✓ Modèles purgés — build OCR uniquement${NC}"
         _SKIP_MODELS=true
         ;;
       *)
@@ -100,8 +91,8 @@ else
   echo ""
 
   if [[ -t 0 ]]; then
-    echo -e "${BLUE}   Modèle de traduction (NLLB-200-distilled-600M, ~500 Mo) :${NC}"
-    echo -e "   ${BLUE}[Entrée]${NC} Télécharger maintenant"
+    echo -e "${BLUE}   Modèles Opus-MT (Argos, ~50-100 Mo/paire) :${NC}"
+    echo -e "   ${BLUE}[Entrée]${NC} Télécharger toutes les paires"
     echo -e "   ${BLUE}[s]${NC}      Sauter — build OCR uniquement"
     echo ""
     read -r -p "   > " _MC
@@ -111,81 +102,27 @@ else
         _SKIP_MODELS=true
         ;;
       *)
-        echo -e "${GREEN}   → Téléchargement du modèle NLLB${NC}"
+        echo -e "${GREEN}   → Téléchargement des modèles Opus-MT${NC}"
         ;;
     esac
   else
-    echo -e "${YELLOW}📥 Modèle absent — téléchargement automatique${NC}"
+    echo -e "${YELLOW}📥 Modèles absents — téléchargement automatique${NC}"
   fi
 fi
 
 if [[ "$_SKIP_MODELS" == false ]]; then
-  # ── Résolution du token HuggingFace ─────────────────────────────────────────
-  if [[ -t 0 ]]; then
-    if [[ -f "$HF_TOKEN_CACHE" ]]; then
-      _CACHED="$(< "$HF_TOKEN_CACHE")"
-      echo -e "${BLUE}🔑 Token HuggingFace en cache : $(_hf_mask "$_CACHED")${NC}"
-      echo -e "   ${BLUE}[Entrée]${NC} Réutiliser   ${BLUE}[n]${NC} Nouveau   ${BLUE}[s]${NC} Supprimer   ${BLUE}[i]${NC} Ignorer"
-      read -r -p "   > " _HF_CHOICE
-      case "${_HF_CHOICE,,}" in
-        n*)
-          read -r -p "   Nouveau token hf_... : " _NEW_TOKEN
-          if [[ -n "$_NEW_TOKEN" ]]; then
-            printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-            HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
-            echo -e "${GREEN}   ✓ Token mis à jour${NC}"
-          else
-            HF_TOKEN_FOR_BUILD="$_CACHED"
-            echo -e "${BLUE}   Token inchangé${NC}"
-          fi ;;
-        s*)
-          rm -f "$HF_TOKEN_CACHE"
-          echo -e "${YELLOW}   Token supprimé du cache${NC}"
-          read -r -p "   Nouveau token (ou Entrée pour ignorer) : " _NEW_TOKEN
-          if [[ -n "$_NEW_TOKEN" ]]; then
-            printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-            HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
-            echo -e "${GREEN}   ✓ Nouveau token sauvegardé${NC}"
-          fi ;;
-        i*)
-          echo -e "${YELLOW}   Token ignoré${NC}" ;;
-        *)
-          HF_TOKEN_FOR_BUILD="$_CACHED"
-          echo -e "${GREEN}   ✓ Token réutilisé${NC}" ;;
-      esac
-    elif [[ -n "${HF_TOKEN:-}" ]]; then
-      HF_TOKEN_FOR_BUILD="$HF_TOKEN"
-      echo -e "${BLUE}🔑 \$HF_TOKEN détecté ($(_hf_mask "$HF_TOKEN"))${NC}"
-      read -r -p "   Sauvegarder en cache local (.hf_token) ? [O/n] : " _SAVE
-      if [[ "${_SAVE,,}" != n* ]]; then
-        printf '%s' "$HF_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-        echo -e "${GREEN}   ✓ Token sauvegardé dans $HF_TOKEN_CACHE${NC}"
-      fi
-    else
-      echo -e "${BLUE}🔑 Token HuggingFace (optionnel — évite le rate-limiting)${NC}"
-      echo -e "   Créer un token Read sur https://huggingface.co/settings/tokens"
-      read -r -p "   Token hf_... (Entrée pour ignorer) : " _NEW_TOKEN
-      if [[ -n "$_NEW_TOKEN" ]]; then
-        printf '%s' "$_NEW_TOKEN" > "$HF_TOKEN_CACHE"; chmod 600 "$HF_TOKEN_CACHE"
-        HF_TOKEN_FOR_BUILD="$_NEW_TOKEN"
-        echo -e "${GREEN}   ✓ Token sauvegardé dans $HF_TOKEN_CACHE${NC}"
-      else
-        echo -e "${YELLOW}   Aucun token — téléchargement public sans authentification.${NC}"
-      fi
-    fi
-  else
-    _load_hf_token
-  fi
+  _CLEAN_FLAG=""
+  [[ "${_MC,,}" == r* ]] && _CLEAN_FLAG="--clean"
 
   echo ""
-  echo -e "${YELLOW}   Téléchargement de nllb-200-distilled-600M (~500 Mo)...${NC}"
-  _HF_ARGS=()
-  [[ -n "$HF_TOKEN_FOR_BUILD" ]] && _HF_ARGS=("--hf-token" "$HF_TOKEN_FOR_BUILD")
-
-  if ./scripts/prepare_translation_models.sh --clean "${_HF_ARGS[@]}"; then
-    echo -e "${GREEN}✅ nllb-200-distilled-600M téléchargé${NC}"
+  if ./scripts/prepare_translation_models.sh $_CLEAN_FLAG; then
+    _n_ok=0
+    for _d in "$FLUTTER_MODELS_DIR"/*/; do
+      [[ -f "$_d/model/model.bin" ]] && ((_n_ok++)) || true
+    done
+    echo -e "${GREEN}✅ $_n_ok modèle(s) Opus-MT prêt(s)${NC}"
   else
-    echo -e "${YELLOW}⚠️  Téléchargement échoué — build sans traduction (OCR OK)${NC}"
+    echo -e "${YELLOW}⚠️  Certains modèles n'ont pas pu être téléchargés — traduction partielle${NC}"
   fi
 fi
 

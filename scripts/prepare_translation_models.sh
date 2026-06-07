@@ -1,224 +1,193 @@
 #!/bin/bash
 #
-# Télécharge NLLB-200-distilled-600M (CTranslate2 INT8, pré-converti).
+# Télécharge les modèles Opus-MT (format Argos/CTranslate2) depuis argos-net.com.
 #
 # Usage :
-#   ./scripts/prepare_translation_models.sh [OPTIONS]
+#   ./scripts/prepare_translation_models.sh [OPTIONS] [PAIRES...]
 #
 # OPTIONS
-#   -h, --help          Cette aide
-#   --clean             Re-télécharge même si model.bin existe déjà
-#   --hf-token TOKEN    Token HuggingFace (recommandé pour éviter le rate-limiting)
+#   -h, --help      Cette aide
+#   --clean         Re-télécharge même si le modèle existe déjà
+#   --list          Liste les paires disponibles dans l'index Argos et quitte
 #
-# WORKFLOW
-#   1. Installe huggingface_hub + hf-transfer (~quelques Mo, quelques secondes)
-#   2. Télécharge michaelfeil/ct2fast-nllb-200-distilled-600M (~500 Mo)
-#      (modèle CTranslate2 INT8 pré-converti — aucune dépendance torch/transformers)
-#   3. Place le résultat dans assets/translation_models/nllb-200-distilled-600M/
+# PAIRES (optionnel)
+#   Ex : ja-en en-fr ru-en en-de
+#   Si omises, télécharge toutes les paires déclarées dans pubspec.yaml
+#   qui ont un modèle disponible dans l'index Argos.
 #
-# DEST_DIR : flutter_app/assets/translation_models/ (non modifiable, fixé par pubspec)
+# ARCHITECTURE
+#   Pivot via l'anglais : ja→fr = ja-en + en-fr (deux modèles)
+#   Chaque répertoire contient :
+#     model/model.bin        — CTranslate2
+#     sentencepiece.model    — tokenizer partagé
+#
+# DEST_DIR : flutter_app/assets/translation_models/ (fixé par pubspec.yaml)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="$SCRIPT_DIR/../flutter_app/assets/translation_models"
-CACHE_BASE="$SCRIPT_DIR/../.ct2_cache"
-PKGS_DIR="$CACHE_BASE/pkgs"
-PIP_CACHE_DIR="$CACHE_BASE/pip"
-PKGS_HASH_FILE="$CACHE_BASE/pkgs.hash"
-HF_TOKEN_CACHE="$SCRIPT_DIR/../.hf_token"
-PIP_PYZ=""
+INDEX_URL="https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json"
 
-MODEL_KEY="nllb-200-distilled-600M"
-# Modèle CTranslate2 INT8 pré-converti — évite torch + transformers
-MODEL_HF="Serkan007/CTranslate2-nllb-200-int8"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 # ─── Aide ─────────────────────────────────────────────────────────────────────
 usage() {
   cat <<EOF
-Usage: $0 [OPTIONS]
+Usage: $0 [OPTIONS] [PAIRES...]
 
-Télécharge NLLB-200-distilled-600M (CTranslate2 INT8, pré-converti).
+Télécharge les modèles Opus-MT (Argos) pour la traduction OCR.
 
 OPTIONS
-  -h, --help          Cette aide
-  --clean             Re-télécharge même si model.bin existe déjà
-  --hf-token TOKEN    Token HuggingFace (évite le rate-limiting)
+  -h, --help      Cette aide
+  --clean         Re-télécharge même si déjà présent
+  --list          Liste les paires disponibles dans l'index Argos
 
-MODÈLE
-  Source  : $MODEL_HF (~500 Mo)
-  Sortie  : $DEST_DIR/$MODEL_KEY/
-
-TOKEN HUGGINGFACE
-  Priorité : --hf-token > .hf_token > \$HF_TOKEN > huggingface-cli login
-  Créer un token Read sur https://huggingface.co/settings/tokens
+PAIRES (optionnel, format {from}-{to})
+  ja-en en-fr ru-en …
+  Si omises : toutes les paires déclarées dans pubspec.yaml
 
 EXEMPLES
-  $0                              # Téléchargement direct
-  $0 --clean                      # Forcer le re-téléchargement
-  $0 --hf-token hf_xxxx           # Avec token HF
+  $0                    # Tout télécharger (selon pubspec.yaml)
+  $0 ja-en en-fr        # Seulement ces deux paires
+  $0 --clean ja-en      # Forcer le re-téléchargement de ja-en
+  $0 --list             # Voir ce qui est disponible
 EOF
-}
-
-# ─── Installation minimale : huggingface_hub + hf-transfer ───────────────────
-_pkgs_hash() {
-  local py_ver
-  py_ver=$(python3 -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null || echo "?")
-  printf '%s\n' "py=${py_ver}" "huggingface_hub>=0.20" "hf-transfer" \
-    | md5sum | cut -d' ' -f1
-}
-
-setup_packages() {
-  mkdir -p "$PKGS_DIR" "$PIP_CACHE_DIR"
-  local current_hash; current_hash=$(_pkgs_hash)
-
-  if [[ "$CLEAN" == false && -f "$PKGS_HASH_FILE" \
-        && "$(cat "$PKGS_HASH_FILE")" == "$current_hash" ]]; then
-    if PYTHONPATH="$PKGS_DIR" python3 -c "import huggingface_hub" 2>/dev/null; then
-      local hfhub_ver
-      hfhub_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c \
-        "import huggingface_hub; print(huggingface_hub.__version__)" 2>/dev/null || echo "?")
-      echo "→ huggingface_hub $hfhub_ver (cache)"
-      return 0
-    fi
-    echo "→ Cache invalide — réinstallation…"
-    rm -f "$PKGS_HASH_FILE"
-  fi
-
-  if [[ "$CLEAN" == true ]]; then
-    echo "→ --clean : invalidation du cache packages"
-    rm -rf "$PKGS_DIR" && mkdir -p "$PKGS_DIR"
-    rm -f "$PKGS_HASH_FILE"
-  fi
-
-  PIP_PYZ=$(mktemp /tmp/pip_XXXXXXXX.pyz)
-  echo "→ Téléchargement pip bootstrap…"
-  curl -fL --progress-bar "https://bootstrap.pypa.io/pip/pip.pyz" -o "$PIP_PYZ"
-  echo ""
-
-  echo "→ Installation huggingface_hub + hf-transfer…"
-  python3 "$PIP_PYZ" install \
-    "huggingface_hub>=0.20" \
-    hf-transfer \
-    --target "$PKGS_DIR" \
-    --cache-dir "$PIP_CACHE_DIR" \
-    --quiet
-
-  local hfhub_ver
-  hfhub_ver=$(PYTHONPATH="$PKGS_DIR" python3 -c \
-    "import huggingface_hub; print(huggingface_hub.__version__)" 2>/dev/null || echo "")
-  if [[ -z "$hfhub_ver" ]]; then
-    echo "❌ Import huggingface_hub échoué"
-    exit 1
-  fi
-  echo "→ huggingface_hub $hfhub_ver prêt"
-  echo "$current_hash" > "$PKGS_HASH_FILE"
-  echo ""
-}
-
-cleanup_packages() {
-  [[ -n "$PIP_PYZ" && -f "$PIP_PYZ" ]] && rm -f "$PIP_PYZ"
-}
-_on_interrupt() {
-  echo ""; echo "⚠  Interruption — arrêt."
-  echo "   Relancez pour reprendre (model.bin absent = re-téléchargement)."
-  exit 130
-}
-trap cleanup_packages EXIT
-trap _on_interrupt INT TERM
-
-# ─── Téléchargement du modèle pré-converti ───────────────────────────────────
-_download_model() {
-  local hf_id="$1" dest="$2"
-  echo "  Téléchargement $hf_id (~500 Mo)…"
-  _HF_ID="$hf_id" _DEST="$dest" \
-  PYTHONPATH="$PKGS_DIR" HF_XET_HIGH_PERFORMANCE=1 \
-  python3 - <<'PYEOF'
-import os
-from huggingface_hub import snapshot_download
-# Seuls les fichiers nécessaires à CTranslate2 + nllb_translate.py
-snapshot_download(
-    repo_id=os.environ["_HF_ID"],
-    local_dir=os.environ["_DEST"],
-    repo_type="model",
-    token=os.environ.get("HF_TOKEN") or None,
-    allow_patterns=[
-        "model.bin",
-        "sentencepiece.bpe.model",
-        "shared_vocabulary.json",
-        "config.json",
-    ],
-)
-PYEOF
 }
 
 # ─── Arguments ────────────────────────────────────────────────────────────────
 CLEAN=false
-HF_TOKEN_ARG=""
+LIST_ONLY=false
+REQUESTED_PAIRS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help)   usage; exit 0 ;;
-    --clean)     CLEAN=true; shift ;;
-    --hf-token)
-      [[ -z "${2:-}" ]] && { echo "❌ --hf-token requiert un TOKEN"; exit 1; }
-      HF_TOKEN_ARG="$2"; shift 2 ;;
-    *) echo "❌ Option inconnue : $1"; usage; exit 1 ;;
+    -h|--help)  usage; exit 0 ;;
+    --clean)    CLEAN=true; shift ;;
+    --list)     LIST_ONLY=true; shift ;;
+    -*)         echo "❌ Option inconnue : $1"; usage; exit 1 ;;
+    *)          REQUESTED_PAIRS+=("$1"); shift ;;
   esac
 done
 
-# ─── Token HuggingFace ────────────────────────────────────────────────────────
-if [[ -n "$HF_TOKEN_ARG" ]]; then
-  export HF_TOKEN="$HF_TOKEN_ARG"
-  echo "→ Token HF : --hf-token"
-elif [[ -f "$HF_TOKEN_CACHE" ]]; then
-  export HF_TOKEN="$(< "$HF_TOKEN_CACHE")"
-  echo "→ Token HF : .hf_token"
-elif [[ -n "${HF_TOKEN:-}" ]]; then
-  echo "→ Token HF : \$HF_TOKEN"
-elif [[ -f "$HOME/.cache/huggingface/token" ]]; then
-  export HF_TOKEN="$(< "$HOME/.cache/huggingface/token")"
-  echo "→ Token HF : ~/.cache/huggingface/token"
-else
-  echo "ℹ  Aucun token HF (recommandé : --hf-token hf_xxx)"
-fi
-echo ""
+# ─── Récupération de l'index Argos ────────────────────────────────────────────
+echo -e "${BLUE}→ Récupération de l'index Argos…${NC}"
+INDEX_JSON=$(curl -sf "$INDEX_URL" 2>/dev/null) || {
+  echo -e "${RED}❌ Impossible de joindre l'index Argos : $INDEX_URL${NC}"
+  exit 1
+}
 
-# ─── Vérification pré-existante ───────────────────────────────────────────────
-OUT_DIR="$DEST_DIR/$MODEL_KEY"
+# Construit une map from-to → url depuis l'index JSON
+declare -A ARGOS_URLS
+eval "$(echo "$INDEX_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for p in data:
+    fc = p.get('from_code','')
+    tc = p.get('to_code','')
+    links = p.get('links', [])
+    if fc and tc and links:
+        # Échappe pour bash
+        key = fc + '-' + tc
+        url = links[0]
+        print(f'ARGOS_URLS[\"{key}\"]=\"{url}\"')
+")"
 
-if [[ "$CLEAN" == false && -f "$OUT_DIR/model.bin" ]]; then
-  size=$(du -sh "$OUT_DIR/model.bin" | cut -f1)
-  echo "✅ $MODEL_KEY déjà présent ($size) — rien à faire."
-  echo "   Utilisez --clean pour forcer le re-téléchargement."
+if $LIST_ONLY; then
+  echo ""
+  echo "Paires disponibles dans l'index Argos :"
+  for key in $(echo "${!ARGOS_URLS[@]}" | tr ' ' '\n' | sort); do
+    from="${key%-*}"; to="${key#*-}"
+    echo "  $key  →  ${ARGOS_URLS[$key]##*/}"
+  done
   exit 0
 fi
 
-echo "Téléchargement de $MODEL_KEY"
-echo "  Source  : $MODEL_HF"
-echo "  Sortie  : $OUT_DIR"
-echo ""
+# ─── Paires à télécharger ─────────────────────────────────────────────────────
+if [[ ${#REQUESTED_PAIRS[@]} -eq 0 ]]; then
+  # Extraire les paires depuis pubspec.yaml
+  REQUESTED_PAIRS=()
+  while IFS= read -r line; do
+    if [[ "$line" =~ assets/translation_models/([a-z]+-[a-z]+)/ ]]; then
+      REQUESTED_PAIRS+=("${BASH_REMATCH[1]}")
+    fi
+  done < "$SCRIPT_DIR/../flutter_app/pubspec.yaml"
+fi
 
-# ─── Packages ─────────────────────────────────────────────────────────────────
-setup_packages
+echo -e "${BLUE}→ Paires demandées : ${REQUESTED_PAIRS[*]}${NC}"
+echo ""
 
 # ─── Téléchargement ───────────────────────────────────────────────────────────
-mkdir -p "$OUT_DIR" && touch "$OUT_DIR/.gitkeep"
+ok=0; skipped=0; failed=0; unavailable=0
 
-if ! _download_model "$MODEL_HF" "$OUT_DIR"; then
-  echo "❌ Téléchargement échoué"
-  exit 1
-fi
+for pair in "${REQUESTED_PAIRS[@]}"; do
+  OUT_DIR="$DEST_DIR/$pair"
+  MODEL_BIN="$OUT_DIR/model/model.bin"
+
+  if [[ "$CLEAN" == false && -f "$MODEL_BIN" ]]; then
+    size=$(du -sh "$MODEL_BIN" | cut -f1)
+    echo -e "${GREEN}✓ $pair ($size) — déjà présent${NC}"
+    ((skipped++)) || true
+    continue
+  fi
+
+  if [[ -z "${ARGOS_URLS[$pair]:-}" ]]; then
+    echo -e "${YELLOW}⚠  $pair — aucun modèle dans l'index Argos${NC}"
+    ((unavailable++)) || true
+    continue
+  fi
+
+  URL="${ARGOS_URLS[$pair]}"
+  ZIP="/tmp/argos_${pair}.argosmodel"
+  EXTRACT="/tmp/argos_extract_${pair}"
+
+  echo -e "${BLUE}↓  $pair${NC} — ${URL##*/}"
+  if ! curl -fL --progress-bar "$URL" -o "$ZIP"; then
+    echo -e "${RED}❌ Téléchargement échoué : $pair${NC}"
+    ((failed++)) || true
+    continue
+  fi
+
+  rm -rf "$EXTRACT"
+  mkdir -p "$EXTRACT"
+  unzip -q "$ZIP" -d "$EXTRACT"
+  rm -f "$ZIP"
+
+  # Le zip peut contenir un sous-dossier racine — on l'aplatit
+  inner=$(ls "$EXTRACT" 2>/dev/null | head -1)
+  if [[ -n "$inner" && -d "$EXTRACT/$inner" && "$inner" != "model" ]]; then
+    EXTRACT_ROOT="$EXTRACT/$inner"
+  else
+    EXTRACT_ROOT="$EXTRACT"
+  fi
+
+  # Vérifie que le modèle CT2 est bien là
+  if [[ ! -f "$EXTRACT_ROOT/model/model.bin" ]]; then
+    echo -e "${RED}❌ $pair — structure inattendue (model/model.bin absent)${NC}"
+    ls -la "$EXTRACT_ROOT/" || true
+    rm -rf "$EXTRACT"
+    ((failed++)) || true
+    continue
+  fi
+
+  mkdir -p "$OUT_DIR"
+  cp -r "$EXTRACT_ROOT/model" "$OUT_DIR/"
+  cp "$EXTRACT_ROOT/sentencepiece.model" "$OUT_DIR/"
+  [[ -f "$EXTRACT_ROOT/metadata.json" ]] && cp "$EXTRACT_ROOT/metadata.json" "$OUT_DIR/"
+  touch "$OUT_DIR/.gitkeep"
+  rm -rf "$EXTRACT"
+
+  size=$(du -sh "$OUT_DIR" | cut -f1)
+  echo -e "${GREEN}✅ $pair installé ($size)${NC}"
+  ((ok++)) || true
+  echo ""
+done
 
 # ─── Résumé ───────────────────────────────────────────────────────────────────
-echo ""
 echo "════════════════════════════════════════"
-if [[ -f "$OUT_DIR/model.bin" && -f "$OUT_DIR/sentencepiece.bpe.model" ]]; then
-  size=$(du -sh "$OUT_DIR" | cut -f1)
-  echo "✅ $MODEL_KEY téléchargé ($size)"
-  echo "   Fichiers : $(ls "$OUT_DIR" | grep -v '^\.' | tr '\n' ' ')"
-else
-  echo "❌ Téléchargement incomplet : fichiers manquants dans $OUT_DIR"
-  ls -la "$OUT_DIR" || true
-  exit 1
-fi
+echo -e "${GREEN}✅ Installés   : $ok${NC}"
+[[ $skipped -gt 0 ]] && echo -e "${BLUE}⏭  Déjà présents : $skipped${NC}"
+[[ $unavailable -gt 0 ]] && echo -e "${YELLOW}⚠  Non disponibles dans Argos : $unavailable${NC}"
+[[ $failed -gt 0 ]]      && echo -e "${RED}❌ Échecs : $failed${NC}"
+
+[[ $failed -gt 0 ]] && exit 1 || exit 0

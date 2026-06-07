@@ -45,7 +45,38 @@ flutter:
     - assets/models/onnx/
     - assets/scripts/
     - assets/translation_models/
-    - assets/translation_models/nllb-200-distilled-600M/
+    # Modèles Opus-MT (Argos) — pivot via l'anglais
+    # Chaque répertoire contient : model/model.bin + sentencepiece.model
+    - assets/translation_models/ar-en/
+    - assets/translation_models/en-ar/
+    - assets/translation_models/zh-en/
+    - assets/translation_models/en-zh/
+    - assets/translation_models/de-en/
+    - assets/translation_models/en-de/
+    - assets/translation_models/es-en/
+    - assets/translation_models/en-es/
+    - assets/translation_models/fr-en/
+    - assets/translation_models/en-fr/
+    - assets/translation_models/hi-en/
+    - assets/translation_models/en-hi/
+    - assets/translation_models/it-en/
+    - assets/translation_models/en-it/
+    - assets/translation_models/ja-en/
+    - assets/translation_models/en-ja/
+    - assets/translation_models/ko-en/
+    - assets/translation_models/en-ko/
+    - assets/translation_models/nl-en/
+    - assets/translation_models/en-nl/
+    - assets/translation_models/pl-en/
+    - assets/translation_models/en-pl/
+    - assets/translation_models/pt-en/
+    - assets/translation_models/en-pt/
+    - assets/translation_models/ru-en/
+    - assets/translation_models/en-ru/
+    - assets/translation_models/th-en/
+    - assets/translation_models/en-th/
+    - assets/translation_models/vi-en/
+    - assets/translation_models/en-vi/
 
   fonts:
     - family: Roboto
