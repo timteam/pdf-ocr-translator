@@ -1,6 +1,6 @@
 # PDF OCR Translator
 
-Application de traduction PDF OCR entièrement locale — sans backend ni service distant
+Application Flutter Linux desktop qui traduit des PDFs image **entièrement hors-ligne** — aucune donnée ne quitte l'appareil.
 
 ![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)
 ![Flutter](https://img.shields.io/badge/Flutter-3.16+-blue.svg)
@@ -8,76 +8,247 @@ Application de traduction PDF OCR entièrement locale — sans backend ni servic
 
 ---
 
-## Présentation
+## Ce que ça fait
 
-`PDF OCR Translator` est une application Flutter Linux desktop qui extrait du texte depuis des PDFs image via OCR, le traduit, et génère un PDF de sortie avec le texte traduit superposé sur chaque page. Tout le traitement se fait localement sur l'appareil, sans backend ni cloud propriétaire.
+1. Tu sélectionnes un PDF (scanné, photo de document, etc.)
+2. L'application détecte automatiquement la langue de chaque page
+3. Tu confirmes (et surcharges si besoin) avant de lancer
+4. L'OCR extrait chaque bloc de texte avec sa position
+5. La traduction est appliquée hors-ligne via un graphe de modèles
+6. Un nouveau PDF est généré avec le texte traduit superposé sur les pages originales
 
----
-
-## Fonctionnalités (cahier des charges)
-
-- Extraction OCR depuis des pages PDF image
-- Traduction dans plusieurs langues
-- Génération d'un PDF de sortie avec textes en surimpression
-- Choix du chemin et nom du fichier de sortie avant le lancement
-- Indicateur de progression détaillé par page et par étape
-- Confidentialité : aucune donnée envoyée vers un backend propriétaire
-- Cache de traduction pour accélérer les traductions répétées
-- Mode offline après première utilisation (grâce au cache)
+**Tout se passe localement.** Pas d'API, pas de clé, pas d'internet requis à l'exécution.
 
 ---
 
-## État d'implémentation
-
-| Fonctionnalité | Statut | Notes |
-|---|---|---|
-| Sélection du PDF source | Implémenté | Via `file_picker` |
-| Choix du fichier de sortie | Implémenté | Dialog pré-rempli avec `source_lang.pdf` dans le même dossier, bouton "Parcourir…" |
-| Rendu des pages en images | Implémenté | `pdftoppm` (poppler-utils) à 150 DPI |
-| OCR | Implémenté | Tesseract CLI, sortie TSV, groupement par paragraphe |
-| Traduction | Implémenté | Google Translate API (réseau requis) + cache JSON local |
-| Cache de traduction | Implémenté | `translation_cache.json` dans les documents de l'app |
-| Génération PDF par page | Implémenté | `compute()` Flutter — exécuté dans un isolate de fond (UI non bloquée) |
-| Assemblage du document final | Implémenté | `pdfunite` (poppler-utils) |
-| Progression détaillée | Implémenté | Cercle global + barre d'étape avec % + barre indéterminée pour l'assemblage |
-| Build Linux desktop | Fonctionnel | `flutter_app/build/linux/x64/release/bundle/` |
-| Packaging Snap | Fonctionnel | Tesseract, tessdata (16 langues) et poppler-utils bundlés |
-| Build Android / iOS | Non validé | Structure Flutter présente, build non testé |
-| Mode offline complet | Partiel | OCR 100 % local ; traduction nécessite le réseau sauf si cachée |
-
----
-
-## Architecture globale
+## Pipeline
 
 ```
-PDF source (sélectionné par l'utilisateur)
-   │
-   ├─ pdfinfo          → nombre de pages
-   │
-   └─ Pour chaque page :
-        ├─ pdftoppm    → image PNG (150 DPI)
-        ├─ tesseract   → TSV → blocs texte + bounding boxes
-        ├─ translator  → Google Translate API + cache JSON local
-        └─ compute()   → PDF de la page (isolate de fond)
-                              │
-                              └─ fichier PDF temporaire
-   │
-   └─ pdfunite         → assemblage en fichier de destination
+PDF source
+  │
+  ├── pdfinfo ──────────────────────────── nombre de pages
+  │
+  ├── Phase 1 — Détection de langue
+  │     pdftoppm 150 DPI → PNG
+  │     paddle_runner.py (RapidOCR, 3 passes) + fasttext_detect.py
+  │     → code langue BCP-47 par page
+  │
+  ├── Écran de confirmation
+  │     miniatures + langues détectées, personnalisation optionnelle par page
+  │
+  ├── Phase 2 — Traduction
+  │     pdftoppm 600 DPI → PNG
+  │     paddle_runner.py → blocs texte + bounding boxes
+  │     nllb_translate.py → NLLB-200-distilled-600M (CTranslate2) traduction directe
+  │     compute() → PDF de page (isolate Flutter)
+  │
+  └── pdfunite ─────────────────────────── PDF de sortie assemblé
 ```
 
-**Outils système requis :**
-- `poppler-utils` — fournit `pdfinfo`, `pdftoppm`, `pdfunite`
-- `tesseract-ocr` + fichiers `tessdata` par langue
+---
 
-**Packages Flutter actifs :**
-- `pdf` — génération des pages PDF avec overlay
-- `image` — décodage PNG pour calcul des dimensions en points
-- `translator` — wrapper Google Translate
-- `provider` + `go_router` — state management et navigation
-- `file_picker` — sélection du PDF source et du fichier de sortie
-- `path_provider`, `path`, `logger`, `shared_preferences`
+## Modèle de traduction
 
-> La traduction utilise le package `translator`, wrapper non officiel de Google Translate. Elle nécessite le réseau. Le cache local JSON prend le relais pour les textes déjà traduits.
+L'application utilise **[NLLB-200-distilled-600M](https://huggingface.co/facebook/nllb-200-distilled-600M)** de Meta AI :
+
+- **200 langues** — traduction directe sans pivot intermédiaire (ex : japonais → français en une seule passe)
+- **Format CTranslate2 INT8** — ~500 MB, inférence CPU optimisée
+- **Un seul modèle** remplace l'ancien graphe de 24 modèles Opus-MT
+
+```
+   Source ──[NLLB-200]──▶ Cible
+```
+
+### Codes de langue
+
+| Langue | Code interne | Code NLLB |
+|--------|---|---|
+| Anglais | `en` | `eng_Latn` |
+| Français | `fr` | `fra_Latn` |
+| Espagnol | `es` | `spa_Latn` |
+| Allemand | `de` | `deu_Latn` |
+| Italien | `it` | `ita_Latn` |
+| Portugais | `pt` | `por_Latn` |
+| Néerlandais | `nl` | `nld_Latn` |
+| Polonais | `pl` | `pol_Latn` |
+| Russe | `ru` | `rus_Cyrl` |
+| Japonais | `ja` | `jpn_Jpan` |
+| Chinois (simp.) | `zh` | `zho_Hans` |
+| Coréen | `ko` | `kor_Hang` |
+| Arabe | `ar` | `ara_Arab` |
+| Hindi | `hi` | `hin_Deva` |
+| Thaï | `th` | `tha_Thai` |
+| Vietnamien | `vi` | `vie_Latn` |
+
+---
+
+## Langues supportées
+
+| Code | Langue | Script OCR |
+|------|--------|-----------|
+| `en` | English | ch (PP-OCRv4) |
+| `fr` | Français | ch |
+| `es` | Español | ch |
+| `de` | Deutsch | ch |
+| `it` | Italiano | ch |
+| `pt` | Português | ch |
+| `nl` | Nederlands | ch |
+| `pl` | Polski | ch |
+| `ru` | Русский | cyrillic (PP-OCRv5) |
+| `ja` | 日本語 | japan (PP-OCRv1) |
+| `zh` | 中文 | ch |
+| `ko` | 한국어 | korean (PP-OCRv1) |
+| `ar` | العربية | arabic (PP-OCRv5) |
+| `hi` | हिन्दी | devanagari (PP-OCRv5) |
+| `th` | ไทย | thai (PP-OCRv5) |
+| `vi` | Tiếng Việt | ch |
+
+---
+
+## OCR — Préprocessing adaptatif
+
+RapidOCR normalise en interne avec `(px/255 − 0.5) / 0.5` sur image BGR 3 canaux. Le préprocessing externe est donc **adaptatif et non-destructif** :
+
+| Étape | Condition | Raison |
+|-------|-----------|--------|
+| CLAHE sur canal L (LAB) | std pixel < 45 | Améliore le contraste local sans toucher la couleur |
+| Unsharp masking | Variance Laplacien < 150 | Renforce les bords pour DBNet |
+| Aucun préprocessing | Image déjà nette | Évite d'introduire des artefacts inutiles |
+
+**Ne jamais appliquer** : binarisation Otsu, conversion en niveaux de gris, deskew Python (le deskew Dart 3 passes ±10° est déjà appliqué en amont).
+
+---
+
+## Installation (utilisateur final)
+
+Le snap est **autonome** : Python 3.12, RapidOCR, CTranslate2, sentencepiece, FastText et poppler-utils sont bundlés — aucune dépendance à installer.
+
+```bash
+# Snap Store (à venir)
+sudo snap install pdf-ocr-translator
+
+# Ou depuis un fichier local
+sudo snap install --dangerous pdf-ocr-translator_0.1.0_amd64.snap
+bash install-local.sh   # établit la connexion GTK3 (gnome-46-2404)
+```
+
+---
+
+## Build depuis les sources
+
+### Prérequis
+
+```bash
+# Toolchain Flutter Linux
+sudo apt install build-essential cmake ninja-build clang pkg-config libgtk-3-dev libglycin-2-0
+
+# Flutter SDK
+git clone https://github.com/flutter/flutter.git -b stable ~/flutter
+export PATH="$HOME/flutter/bin:$PATH"
+flutter config --enable-linux-desktop
+
+# Snapcraft
+sudo snap install snapcraft --classic
+sudo snap install gnome-46-2404
+```
+
+Python, les wheels et poppler ne sont **pas** à installer sur la machine de build — ils sont téléchargés et bundlés automatiquement.
+
+### Modèle de traduction — deux modes de livraison
+
+Le modèle **NLLB-200-distilled-600M** est téléchargé directement au format **CTranslate2 INT8 pré-converti** (~500 MB). Aucun torch ni transformers requis.
+
+```
+Serkan007/CTranslate2-nllb-200-int8 (~500 Mo, CT2 INT8 pré-converti)
+        │
+  [prepare_translation_models.sh]   ← téléchargement direct, one-shot dev
+        │
+  ┌─────┴──────────────────────────────────┐
+  │                                        │
+  ▼                                        ▼
+Bundlé dans le snap              Téléchargeable à la volée
+flutter_app/assets/              depuis l'app (runtime)
+translation_models/              → ~/.local/share/pdf-ocr-translator/
+nllb-200-distilled-600M/           translation_models/
+```
+
+**Mode 1 — Bundlé dans le snap (build-time)**
+
+```bash
+chmod +x scripts/prepare_translation_models.sh
+./scripts/prepare_translation_models.sh
+
+# Avec token HuggingFace (recommandé)
+./scripts/prepare_translation_models.sh --hf-token hf_xxxx
+
+# Forcer le re-téléchargement
+./scripts/prepare_translation_models.sh --clean
+```
+
+Le modèle (~500 MB) est écrit dans `flutter_app/assets/translation_models/nllb-200-distilled-600M/` et bundlé dans le snap au prochain build.
+
+**Mode 2 — Téléchargement à la volée depuis l'app (runtime)**
+
+L'app détecte si le modèle est manquant et propose de le télécharger directement depuis un dépôt HuggingFace Dataset. Le modèle est stocké dans `~/.local/share/pdf-ocr-translator/translation_models/` (prioritaire sur le modèle bundlé).
+
+Pour activer ce mode, uploader le modèle converti une fois :
+
+```bash
+# 1. Convertir
+./scripts/prepare_translation_models.sh --hf-token hf_...
+
+# 2. Uploader vers le dépôt HF Dataset
+./scripts/upload_models_to_hf.sh \
+  --repo Timteamteem/nllb-ct2 \
+  --hf-token hf_...
+
+# 3. Vérifier la constante dans Flutter
+#    flutter_app/lib/services/model_download_service.dart
+#    → const String kModelHfRepo = 'Timteamteem/nllb-ct2';
+```
+
+#### Token HuggingFace (recommandé)
+
+Le modèle `facebook/nllb-200-distilled-600M` est public mais un token évite le rate-limiting. Crée un token **Read** sur [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
+
+**`build-snap.sh` gère le token interactivement** et le met en cache dans `.hf_token` (gitignore, `chmod 600`) :
+
+```
+🔑 Token HuggingFace en cache : hf_xxxx****
+   [Entrée] Réutiliser   [n] Nouveau   [s] Supprimer   [i] Ignorer
+   >
+```
+
+Pour les builds non interactifs (CI/CD) :
+
+| Méthode | |
+|---------|--|
+| Variable d'environnement | `HF_TOKEN=hf_xxxx bash build-snap.sh` |
+| Argument direct au script | `./scripts/prepare_translation_models.sh --hf-token hf_xxxx` |
+
+### Build
+
+```bash
+cd flutter_app && flutter pub get && cd ..
+bash build-snap.sh          # ~20-30 min au premier build (téléchargements inclus)
+bash build-snap.sh          # ~3-5 min ensuite (incrémental)
+bash build-snap.sh --clean  # rebuild complet (~15 min)
+```
+
+`build-snap.sh` orchestre dans l'ordre :
+1. Téléchargement du modèle FastText LID (`lid.176.ftz`, ~900 KB)
+2. Téléchargement des wheels Python (~185 MB)
+3. Vérification de la présence des modèles de traduction
+4. `flutter build linux --release`
+5. `snapcraft`
+
+### Mode développement Flutter (sans snap)
+
+```bash
+sudo apt install poppler-utils
+pip3 install rapidocr-onnxruntime onnxruntime opencv-python ctranslate2 sentencepiece fasttext-wheel
+cd flutter_app && flutter run -d linux
+```
 
 ---
 
@@ -87,231 +258,78 @@ PDF source (sélectionné par l'utilisateur)
 pdf-ocr-translator/
 ├── flutter_app/
 │   ├── lib/
-│   │   ├── main.dart                    # Bootstrap, Provider, GoRouter
+│   │   ├── main.dart                     # Bootstrap, GoRouter
 │   │   ├── screens/
-│   │   │   ├── home_screen.dart         # Sélection PDF + langues + dialog sortie
-│   │   │   ├── processing_screen.dart   # Progression globale + étape courante
-│   │   │   └── result_screen.dart       # Affichage du fichier produit
+│   │   │   ├── home_screen.dart          # Sélection PDF, langue cible, chemin sortie
+│   │   │   ├── processing_screen.dart    # Détection → confirmation → traduction
+│   │   │   └── result_screen.dart        # Fichier produit
 │   │   ├── services/
-│   │   │   ├── pdf_service.dart         # Pipeline complet (pdfinfo/pdftoppm/pdfunite/compute)
-│   │   │   ├── ocr_service.dart         # Tesseract CLI → TSV → OCRTextBlock[]
-│   │   │   └── translation_service.dart # GoogleTranslator + cache JSON
-│   │   ├── models/
-│   │   │   ├── language.dart            # 16 langues supportées
-│   │   │   └── processing.dart          # ProcessingUpdate (progression)
-│   │   └── theme/
-│   │       └── app_theme.dart
-│   ├── assets/fonts/
-│   ├── linux/
-│   ├── pubspec.yaml
-│   └── test/
-├── snapcraft.yaml                       # Snap (core22, confinement strict)
-├── build-snap.sh                        # Script de build snap
-├── SNAP-README.md
-├── DEVELOPMENT.md
-├── CONTRIBUTING.md
-└── README.md
+│   │   │   ├── pdf_service.dart          # Orchestration pdfinfo/pdftoppm/pdfunite
+│   │   │   ├── ocr_service.dart          # RapidOCR + FastText + deskew
+│   │   │   ├── translation_service.dart  # Graphe de pivots Opus-MT
+│   │   │   └── model_download_service.dart # Téléchargement HTTP depuis HF Dataset
+│   │   └── models/
+│   │       ├── language.dart             # 16 langues supportées
+│   │       ├── language_detection.dart   # PageLanguage (code, surcharge, miniature)
+│   │       └── processing.dart           # ProcessingUpdate (progression)
+│   └── assets/
+│       ├── models/
+│       │   ├── lid.176.ftz               # FastText LID (~900 KB)
+│       │   └── onnx/                     # Modèles RapidOCR PP-OCR (ONNX)
+│       │       ├── japan_rec.onnx        # PP-OCRv1, ja
+│       │       ├── korean_rec.onnx       # PP-OCRv1, ko
+│       │       ├── arabic_rec.onnx       # PP-OCRv5 mobile, ar
+│       │       ├── cyrillic_rec.onnx     # PP-OCRv5 mobile, ru
+│       │       ├── devanagari_rec.onnx   # PP-OCRv5 mobile, hi
+│       │       └── thai_rec.onnx         # PP-OCRv5 mobile, th
+│       ├── translation_models/           # NLLB-200 CTranslate2 INT8 (généré par script)
+│       │   └── nllb-200-distilled-600M/  # model.bin + sentencepiece.bpe.model
+│       └── scripts/
+│           ├── paddle_runner.py          # OCR et détection de script
+│           ├── fasttext_detect.py        # Classification de langue FastText
+│           └── nllb_translate.py         # Traduction par lot CTranslate2
+├── scripts/
+│   ├── download_fasttext_model.sh        # Télécharge lid.176.ftz
+│   ├── download_pip_wheels.sh            # Télécharge les wheels Python
+│   ├── prepare_translation_models.sh    # Télécharge et convertit NLLB → CTranslate2
+│   └── upload_models_to_hf.sh           # Upload du modèle converti vers HF Dataset
+├── snapcraft.yaml                        # Snap (core24, confinement strict)
+├── build-snap.sh                         # Orchestration du build complet
+└── install-local.sh                      # Installation + connexion GTK3
 ```
 
 ---
 
-## Flux utilisateur
+## Stack technique
 
-1. **HomeScreen** — sélection du PDF source, choix des langues source et cible
-2. **Dialog "Fichier de sortie"** — chemin pré-rempli (`même_dossier/nom_lang.pdf`), modifiable, bouton "Parcourir…"
-3. **ProcessingScreen** — pour chaque page :
-   - Rendu PNG (`pdftoppm`)
-   - Extraction OCR (`tesseract`, TSV)
-   - Traduction bloc par bloc (avec cache)
-   - Écriture du PDF de page dans un isolate (`compute`)
-   - Indicateur global (cercle %) + indicateur d'étape (barre linéaire %)
-4. **Assemblage** — `pdfunite` fusionne tous les PDFs de pages → fichier de destination (barre indéterminée)
-5. **ResultScreen** — chemin du fichier produit
+| Couche | Technologie | Rôle |
+|--------|-------------|------|
+| UI | Flutter 3.16+, GoRouter | Interface Linux desktop |
+| PDF | poppler-utils (`pdftoppm`, `pdfunite`) | Rendu et assemblage |
+| OCR | RapidOCR 1.4.4 + ONNX Runtime 1.26 | PP-OCRv4/v5 via ONNX, compatible AVX (sans AVX2) |
+| Détection langue | PP-OCRv4 (3 passes) + FastText LID 176 | Script Unicode → BCP-47 |
+| Traduction | NLLB-200-distilled-600M (Meta) + CTranslate2 + sentencepiece | 1 modèle INT8, 200 langues, traduction directe |
+| Packaging | Snap (core24, confinement strict) | Autonome, sans dépendances système |
 
----
-
-## Langues supportées
-
-16 langues définies dans `language.dart`, mappées vers les codes Tesseract dans `ocr_service.dart` :
-
-| App | Tesseract | Langue |
-|-----|-----------|--------|
-| `en` | `eng` | English |
-| `fr` | `fra` | Français |
-| `es` | `spa` | Español |
-| `de` | `deu` | Deutsch |
-| `it` | `ita` | Italiano |
-| `pt` | `por` | Português |
-| `nl` | `nld` | Nederlands |
-| `pl` | `pol` | Polski |
-| `ru` | `rus` | Русский |
-| `ja` | `jpn` | 日本語 |
-| `zh` | `chi_sim` | 中文 |
-| `ko` | `kor` | 한국어 |
-| `ar` | `ara` | العربية |
-| `hi` | `hin` | हिन्दी |
-| `th` | `tha` | ไทย |
-| `vi` | `vie` | Tiếng Việt |
+> **Pourquoi ONNX Runtime ?** PaddlePaddle 3.3.1 utilise des instructions AVX2 absentes sur les CPUs Ivy Bridge (2012). ONNX Runtime dispatche les instructions au runtime — AVX suffit.
 
 ---
 
-## Prérequis de build
+## Limites connues
 
-### Linux desktop
-
-```bash
-sudo apt update
-sudo apt install \
-  build-essential cmake ninja-build clang++ pkg-config \
-  libgtk-3-dev libglib2.0-dev liblzma-dev \
-  poppler-utils
-```
-
-Tesseract et les tessdata :
-
-```bash
-sudo apt install \
-  tesseract-ocr \
-  tesseract-ocr-eng tesseract-ocr-fra tesseract-ocr-deu tesseract-ocr-spa \
-  tesseract-ocr-ita tesseract-ocr-por tesseract-ocr-nld tesseract-ocr-pol \
-  tesseract-ocr-rus tesseract-ocr-jpn tesseract-ocr-chi-sim tesseract-ocr-kor \
-  tesseract-ocr-ara tesseract-ocr-hin tesseract-ocr-tha tesseract-ocr-vie
-```
-
-Flutter SDK :
-
-```bash
-git clone https://github.com/flutter/flutter.git -b stable ~/flutter
-export PATH="$HOME/flutter/bin:$PATH"
-flutter doctor
-flutter config --enable-linux-desktop
-```
-
-> En production (snap), `poppler-utils`, `tesseract-ocr` et les 16 tessdata sont bundlés via `stage-packages` dans `snapcraft.yaml`. L'utilisateur final n'a rien à installer.
-
-### Snap
-
-```bash
-sudo snap install snapcraft --classic
-```
-
----
-
-## Procédure de build
-
-### 1. Dépendances Flutter
-
-```bash
-cd flutter_app
-flutter pub get
-```
-
-### 2. Mode développement
-
-```bash
-flutter run -d linux
-```
-
-### 3. Build Linux release
-
-```bash
-flutter build linux --release
-```
-
-Binaire produit dans :
-```
-flutter_app/build/linux/x64/release/bundle/pdf_ocr_translator
-```
-
-### 4. Build Snap
-
-```bash
-cd /chemin/vers/pdf-ocr-translator
-bash build-snap.sh
-```
-
-Le script compile le bundle Flutter, puis lance `snapcraft` qui télécharge et bundle `poppler-utils`, `tesseract-ocr` et les tessdata.
-
-### 5. Installation locale du snap
-
-```bash
-sudo snap install ./snap-builds/pdf-ocr-translator_*.snap --dangerous
-pdf-ocr-translator
-```
-
-### 6. Build mobile (non validé)
-
-```bash
-flutter build apk --release
-flutter build ios --release   # macOS uniquement
-```
-
----
-
-## Dépendances clés
-
-### Packages Flutter actifs
-
-| Package | Usage |
-|---|---|
-| `provider: ^6.0.0` | Gestion d'état |
-| `go_router: ^12.0.0` | Navigation |
-| `file_picker: ^6.0.0` | Sélection fichiers (source + destination) |
-| `pdf: ^3.10.0` | Génération PDF par page avec overlay |
-| `image: ^4.1.0` | Décodage PNG pour calcul dimensions |
-| `translator: ^1.0.0` | Wrapper Google Translate (réseau) |
-| `shared_preferences: ^2.2.0` | Persistance légère |
-| `path_provider: ^2.1.0` | Chemins système |
-| `path: ^1.8.3` | Manipulation de chemins |
-| `logger: ^2.0.0` | Logging |
-| `permission_handler: ^11.0.0` | Permissions fichiers |
-| `printing: ^5.12.0` | Déclaré, non utilisé activement |
-
-### Packages déclarés, non utilisés dans le code actuel
-
-| Package | Raison |
-|---|---|
-| `flutter_riverpod: ^2.4.0` | Remplacé par `provider` |
-| `flutter_translate: ^4.1.0` | Non intégré |
-| `pdfx: ^2.4.0` | Rendu remplacé par `pdftoppm` |
-| `shimmer`, `fluttertoast`, `awesome_dialog`, etc. | UI non finalisée |
-
-### Outils système
-
-| Outil | Paquet apt | Usage |
-|---|---|---|
-| `pdfinfo` | `poppler-utils` | Comptage des pages |
-| `pdftoppm` | `poppler-utils` | Rendu page → PNG |
-| `pdfunite` | `poppler-utils` | Assemblage PDF final |
-| `tesseract` | `tesseract-ocr` | Extraction OCR |
-| tessdata | `tesseract-ocr-[lang]` | Modèles par langue |
-
----
-
-## Problèmes connus
-
-- La traduction nécessite une connexion Internet (Google Translate API). Le mode offline complet n'est pas encore atteint.
-- `flutter_riverpod`, `pdfx`, `flutter_translate` et quelques packages UI sont déclarés dans `pubspec.yaml` mais non utilisés.
-- La génération PDF par page utilise `compute()` (isolate Flutter) pour rester non bloquante — l'approche est validée sur 110 pages.
-- `pdfunite` doit être installé sur le système hôte en développement (inclus dans `poppler-utils`).
-
----
-
-## Branches
-
-- `main` — branche principale
-- `feature/pdf-ocr-translator-setup` — branche courante
+- **OCR manuscrit** : PP-OCRv4 est optimisé pour le texte imprimé
+- **PDF vectoriel** : l'OCR n'est pas utile si le PDF contient déjà du texte sélectionnable
+- **Mise en page complexe** : les bounding boxes texte sont superposées mais la police de substitution ne correspond pas toujours à l'original
+- **Modèle de traduction** : NLLB-200-distilled-600M peut être bundlé dans le snap (build-time via `prepare_translation_models.sh`) ou téléchargé à la volée depuis l'app — le modèle doit avoir été uploadé sur le dépôt HF (`upload_models_to_hf.sh`) pour que le téléchargement runtime fonctionne
 
 ---
 
 ## Licence
 
-Apache License 2.0
+Apache License 2.0 — voir [LICENSE](LICENSE)
 
-## Contribuer
+## Crédits
 
-1. Fork du dépôt
-2. Créer une branche : `git checkout -b feature/ma-fonctionnalite`
-3. Commit : `git commit -m 'feat: description'`
-4. Push : `git push origin feature/ma-fonctionnalite`
-5. Créer une Pull Request
+[RapidOCR](https://github.com/RapidAI/RapidOCR) · [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [ONNX Runtime](https://onnxruntime.ai) · [CTranslate2](https://github.com/OpenNMT/CTranslate2) · [NLLB-200 / Meta AI](https://huggingface.co/facebook/nllb-200-distilled-600M) · [FastText](https://fasttext.cc) · [Flutter](https://flutter.dev)
+
+Issues et contributions : [github.com/AgentLeChat/pdf-ocr-translator](https://github.com/AgentLeChat/pdf-ocr-translator)

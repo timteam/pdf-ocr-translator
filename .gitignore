@@ -13,6 +13,7 @@ parts/
 prime/
 stage/
 .snapcraft/
+libs/           # libs bundlées depuis le host (générées par build-snap.sh)
 
 # Mobile builds
 builds/
@@ -32,7 +33,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -98,4 +98,32 @@ npm-debug.log*
 # Project specific
 output/
 translations_cache/
-models/
+
+# Modèles de traduction (fichiers générés — ne pas commiter)
+# Les règles de contenu sont dans flutter_app/assets/translation_models/.gitignore
+assets/models/
+assets/translation_models/
+translation_models/
+snap/translation_models/
+!flutter_app/assets/translation_models/
+*.bin
+*.pt
+*.safetensors
+
+# Exception : modèles ONNX statiques bundlés dans le snap
+!flutter_app/assets/models/
+!flutter_app/assets/models/onnx/
+!flutter_app/assets/models/onnx/*.onnx
+*.deb
+*.rpm
+.snapcraft_yaml_hash
+
+# Cache wheels Python (pip download)
+wheels/.hash
+
+# Token HuggingFace (cache local build-snap.sh, chmod 600)
+.hf_token
+
+# Cache packages de conversion (ctranslate2, torch, transformers)
+# Évite de re-télécharger ~500 MB à chaque build
+.ct2_cache/

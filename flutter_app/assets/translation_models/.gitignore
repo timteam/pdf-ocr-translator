@@ -1,0 +1,7 @@
+# Fichiers générés par prepare_translation_models.sh + convert_model.py
+# Seuls .gitkeep (requis par pubspec.yaml) et README.md sont trackés.
+*.spm
+*.model
+*.bin
+*.json
+*.txt

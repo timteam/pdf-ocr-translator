@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0D47A1"/>
+      <stop offset="100%" stop-color="#1565C0"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+
+  <!-- PDF Document -->
+  <g filter="url(#shadow)">
+    <path d="M148 96 L340 96 L392 148 L392 432 L148 432 Z" fill="white"/>
+    <!-- Folded corner -->
+    <path d="M340 96 L392 148 L340 148 Z" fill="#BBDEFB"/>
+  </g>
+
+  <!-- Red PDF badge -->
+  <rect x="148" y="96" width="96" height="40" rx="10" fill="#D32F2F"/>
+  <rect x="148" y="112" width="96" height="24" fill="#D32F2F"/>
+  <text x="196" y="116"
+        font-family="Arial Black, Arial, sans-serif"
+        font-size="22" font-weight="900"
+        fill="white" text-anchor="middle" dominant-baseline="central">PDF</text>
+
+  <!-- Document text lines -->
+  <rect x="176" y="176" width="168" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="202" width="148" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="228" width="160" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="254" width="136" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="280" width="154" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="306" width="142" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="332" width="158" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="358" width="130" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+  <rect x="176" y="384" width="148" height="11" rx="5.5" fill="#90CAF9" opacity="0.55"/>
+
+  <!-- ─── Alphabet letter badges ─── -->
+
+  <!-- Latin "A" — orange — top-left -->
+  <circle cx="104" cy="106" r="52" fill="#E65100" filter="url(#shadow)"/>
+  <text x="104" y="106"
+        font-family="Arial Black, Arial, sans-serif"
+        font-size="54" font-weight="900"
+        fill="white" text-anchor="middle" dominant-baseline="central">A</text>
+
+  <!-- Greek "Ω" — teal — top-right -->
+  <circle cx="424" cy="130" r="52" fill="#00695C" filter="url(#shadow)"/>
+  <text x="424" y="130"
+        font-family="Georgia, Times New Roman, serif"
+        font-size="52" font-weight="bold"
+        fill="white" text-anchor="middle" dominant-baseline="central">Ω</text>
+
+  <!-- Cyrillic "Ж" — red — left -->
+  <circle cx="62" cy="290" r="52" fill="#B71C1C" filter="url(#shadow)"/>
+  <text x="62" y="290"
+        font-family="Arial, sans-serif"
+        font-size="52" font-weight="bold"
+        fill="white" text-anchor="middle" dominant-baseline="central">Ж</text>
+
+  <!-- Arabic "ع" — purple — right -->
+  <circle cx="450" cy="290" r="52" fill="#4A148C" filter="url(#shadow)"/>
+  <text x="450" y="290"
+        font-family="Arial, sans-serif"
+        font-size="56" font-weight="bold"
+        fill="white" text-anchor="middle" dominant-baseline="central">ع</text>
+
+  <!-- CJK "文" — green — bottom-center -->
+  <circle cx="256" cy="454" r="52" fill="#1B5E20" filter="url(#shadow)"/>
+  <text x="256" y="454"
+        font-family="serif"
+        font-size="52" font-weight="bold"
+        fill="white" text-anchor="middle" dominant-baseline="central">文</text>
+</svg>

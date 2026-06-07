@@ -11,61 +11,72 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # UI & State Management
-  provider: ^6.0.0
-  go_router: ^12.0.0
-  flutter_riverpod: ^2.4.0
+  # UI & routing
+  go_router: ^17.0.0
 
-  # File handling & Storage
-  file_picker: ^6.0.0
+  # File handling
+  file_picker: ^11.0.0
   path: ^1.8.3
   path_provider: ^2.1.0
-  shared_preferences: ^2.2.0
 
-  # PDF Processing
-  # pdfx supprimé : pas de support Linux desktop (MissingPluginException)
-  # Rendu des pages via pdftoppm (poppler-utils) — voir pdf_service.dart
+  # PDF processing
   pdf: ^3.10.0
-  printing: ^5.12.0
 
-  # Translation (Offline-capable)
-  translator: ^1.0.0
-  flutter_translate: ^4.1.0
-
-  # Image Processing
+  # Image processing
   image: ^4.1.0
 
   # Permissions
-  permission_handler: ^11.0.0
-
-  # UI Components
-  material_design_icons_flutter: ^7.0.0
-  flutter_svg: ^2.0.0
-  shimmer: ^3.0.0
-  fluttertoast: ^8.2.0
-  awesome_dialog: ^3.1.0
+  permission_handler: ^12.0.0
 
   # Logging
   logger: ^2.0.0
 
-  # Utils
-  intl: ^0.19.0
-  uuid: ^4.0.0
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
-  flutter_lints: ^2.0.0
-  build_runner: ^2.4.0
+  flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true
 
   assets:
-    - assets/images/
-    - assets/icons/
     - assets/fonts/
+    - assets/models/
+    - assets/models/onnx/
+    - assets/scripts/
+    - assets/translation_models/
+    # Modèles Opus-MT (Argos) — pivot via l'anglais
+    # Chaque répertoire contient : model/model.bin + sentencepiece.model
+    - assets/translation_models/ar-en/
+    - assets/translation_models/en-ar/
+    - assets/translation_models/zh-en/
+    - assets/translation_models/en-zh/
+    - assets/translation_models/de-en/
+    - assets/translation_models/en-de/
+    - assets/translation_models/es-en/
+    - assets/translation_models/en-es/
+    - assets/translation_models/fr-en/
+    - assets/translation_models/en-fr/
+    - assets/translation_models/hi-en/
+    - assets/translation_models/en-hi/
+    - assets/translation_models/it-en/
+    - assets/translation_models/en-it/
+    - assets/translation_models/ja-en/
+    - assets/translation_models/en-ja/
+    - assets/translation_models/ko-en/
+    - assets/translation_models/en-ko/
+    - assets/translation_models/nl-en/
+    - assets/translation_models/en-nl/
+    - assets/translation_models/pl-en/
+    - assets/translation_models/en-pl/
+    - assets/translation_models/pt-en/
+    - assets/translation_models/en-pt/
+    - assets/translation_models/ru-en/
+    - assets/translation_models/en-ru/
+    - assets/translation_models/th-en/
+    - assets/translation_models/en-th/
+    - assets/translation_models/vi-en/
+    - assets/translation_models/en-vi/
 
   fonts:
     - family: Roboto

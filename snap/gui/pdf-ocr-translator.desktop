@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=PDF OCR Translator
+GenericName=PDF Translator
+Comment=Translate image-based PDFs with OCR — fully offline
+Exec=pdf-ocr-translator
+Icon=pdf-ocr-translator
+Categories=Office;Graphics;Education;
+Keywords=pdf;ocr;translate;translation;scan;document;
+StartupNotify=true

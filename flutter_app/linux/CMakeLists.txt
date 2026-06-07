@@ -126,3 +126,11 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# Bundle tessdata_best models when available (run scripts/setup_tessdata_best.sh first).
+set(TESSDATA_DIR "${CMAKE_SOURCE_DIR}/../../tessdata")
+if(EXISTS "${TESSDATA_DIR}")
+  install(DIRECTORY "${TESSDATA_DIR}/"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/tessdata"
+    COMPONENT Runtime)
+endif()

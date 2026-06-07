@@ -4,30 +4,70 @@ title: PDF OCR Translator
 summary: Fully offline PDF OCR and translation app
 description: |
   PDF OCR Translator extracts text from image-based PDF files using
-  Tesseract OCR and translates it to multiple languages. All OCR
-  processing happens locally on your device — no backend, no cloud.
+  PaddleOCR models via ONNX Runtime (compatible with all x86_64 CPUs)
+  and translates it offline using Opus-MT neural models.
+  Language detection uses FastText LID (176 languages).
+  All processing happens locally on your device — no backend, no cloud.
+
+  Translation models (Opus-MT CTranslate2 INT8, ~50 MB per pair) are bundled in the snap.
 
 license: Apache-2.0
+website: https://github.com/timteam/pdf-ocr-translator
 contact: timothee.troncy@gmail.com
 
-grade: stable
+grade: devel
 confinement: strict
-base: core22
+base: core24
+
+lint:
+  ignore:
+    - library
+    - classic
+
+# gnome-46-2404 fournit GTK3 + GDK-Pixbuf + libepoxy (stack GNOME complète).
+# Le répertoire gnome-platform doit exister dans le snap pour que le content
+# interface puisse y monter le contenu du snap gnome-46-2404 au runtime.
+plugs:
+  gnome-46-2404:
+    interface: content
+    target: $SNAP/gnome-platform
+    default-provider: gnome-46-2404
 
 apps:
   pdf-ocr-translator:
-    command: pdf_ocr_translator
-    environment:
-      TESSDATA_PREFIX: $SNAP/usr/share/tesseract-ocr/4.00/tessdata
+    command: bin/launcher
     plugs:
-      - home
-      - network
-      - opengl
-      - wayland
-      - x11
-      - removable-media
+      - home             # lecture/écriture des PDF dans ~/
+      - desktop          # intégration bureau (fenêtre, icône)
+      - desktop-legacy   # compatibilité GTK3 a11y / ibus
+      - gsettings        # thème, polices et préférences GNOME
+      - opengl           # accès GPU pour le rendu Flutter
+      - wayland          # protocole Wayland (compositeur moderne)
+      - x11              # fallback X11 / XWayland
+      - removable-media  # accès disques amovibles et montages externes
+      - gnome-46-2404    # content snap : GTK3 + GDK-Pixbuf + libepoxy
+      - network          # téléchargement des modèles de traduction à la volée
+    environment:
+      PYTHONPATH: $SNAP/pyenv
+      # GTK3 / GDK-Pixbuf / libepoxy viennent du content snap monté à runtime
+      SNAP_DESKTOP_RUNTIME: $SNAP/gnome-platform
+      # Libs vendorées par les wheels Python (sans RUNPATH — nécessitent LD_LIBRARY_PATH)
+      LD_LIBRARY_PATH: $SNAP/pyenv/numpy.libs:$SNAP/pyenv/opencv_python.libs:$SNAP/pyenv/ctranslate2.libs:$SNAP/pyenv/pillow.libs:$SNAP/pyenv/shapely.libs:$SNAP/gnome-platform/lib/x86_64-linux-gnu:$SNAP/gnome-platform/usr/lib:$SNAP/gnome-platform/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      XDG_DATA_DIRS: $SNAP/gnome-platform/usr/share:$SNAP/usr/share:$XDG_DATA_DIRS
+      GDK_PIXBUF_MODULE_FILE: $SNAP/gnome-platform/usr/lib/x86_64-linux-gnu/gdk-pixbuf-current/loaders.cache
+      # EGL : libEGL.so.1 (GLVND) trouve libEGL_mesa.so.0 via les ICD stagés
+      __EGL_VENDOR_LIBRARY_DIRS: $SNAP/usr/share/glvnd/egl_vendor.d
 
 parts:
+  # Script de lancement : patche le loaders.cache de gnome-46-2404 pour
+  # corriger les chemins absolus GDK-Pixbuf (/usr/lib → $SNAP/gnome-platform/usr/lib).
+  launcher:
+    plugin: dump
+    source: snap-launcher
+    source-type: local
+    organize:
+      'launcher': bin/launcher
+
   flutter-app:
     plugin: dump
     source: ./flutter_app/build/linux/x64/release/bundle
@@ -37,39 +77,178 @@ parts:
     stage:
       - '*'
 
-  # Dépendances GTK3 requises par libflutter_linux_gtk.so et les plugins
-  gtk-runtime:
-    plugin: nil
-    stage-packages:
-      - libatk1.0-0
-      - libcairo2
-      - libepoxy0
-      - libgdk-pixbuf2.0-0
-      - libgtk-3-0
+  # Modèles Opus-MT (CTranslate2) — copiés directement dans le snap
+  # car Flutter ne bundle pas récursivement les sous-dossiers d'assets.
+  # Destination : $SNAP/data/flutter_assets/assets/translation_models/{lang}/
+  # ce qui correspond au chemin vérifié par isModelDirAvailable() côté Dart.
+  translation-models:
+    plugin: dump
+    source: ./flutter_app/assets/translation_models
+    source-type: local
+    organize:
+      '*': data/flutter_assets/assets/translation_models/
 
-  tesseract:
+  # Répertoire de montage pour le content snap gnome-46-2404 (doit exister)
+  gnome-platform-dir:
+    plugin: nil
+    override-prime: |
+      mkdir -p "$SNAPCRAFT_PRIME/gnome-platform"
+
+  # EGL : libepoxy (fourni par le content snap) dlopen-charge libEGL.so.1 au
+  # runtime. libEGL.so.1 (GLVND) doit trouver un provider via les ICD dans
+  # __EGL_VENDOR_LIBRARY_DIRS. libegl-mesa0 fournit libEGL_mesa.so.0 et le
+  # fichier ICD 50_mesa.json — sans lui, epoxy lève "No provider of
+  # eglGetPlatformDisplayEXT found" et l'app crashe.
+  egl-runtime:
     plugin: nil
     stage-packages:
-      - poppler-utils
-      - tesseract-ocr
-      - tesseract-ocr-eng
-      - tesseract-ocr-fra
-      - tesseract-ocr-deu
-      - tesseract-ocr-spa
-      - tesseract-ocr-ita
-      - tesseract-ocr-por
-      - tesseract-ocr-nld
-      - tesseract-ocr-pol
-      - tesseract-ocr-rus
-      - tesseract-ocr-jpn
-      - tesseract-ocr-chi-sim
-      - tesseract-ocr-kor
-      - tesseract-ocr-ara
-      - tesseract-ocr-hin
-      - tesseract-ocr-tha
-      - tesseract-ocr-vie
-    # Exclure les bibliothèques inutilisées signalées par le linter
-    prime:
-      - -usr/lib/x86_64-linux-gnu/libicuio.so*
-      - -usr/lib/x86_64-linux-gnu/libicutest.so*
-      - -usr/lib/x86_64-linux-gnu/libssl3.so*
+      - libegl1       # GLVND wrapper : libEGL.so.1, interface générique EGL
+      - libegl-mesa0  # driver Mesa EGL : libEGL_mesa.so.0 + ICD 50_mesa.json
+      - libgles2      # GLVND wrapper GLES2 : libGLESv2.so.2 (dlopen par Flutter)
+      - libgl1        # GLVND wrapper OpenGL : libGL.so.1 (dlopen par GTK3)
+                      # tire libglx0 + libglx-mesa0 en deps → stack GLX X11 complète
+
+  # Wayland + libs bas niveau requises par GTK3 / Flutter.
+  # Non fournies par core24 ni par le content snap gnome-46-2404.
+  wayland-runtime:
+    plugin: nil
+    stage-packages:
+      - libwayland-client0  # protocole Wayland (connexion au compositeur)
+      - libwayland-cursor0  # curseurs Wayland (thèmes, animations)
+      - libwayland-egl1     # bridge Wayland-EGL pour le rendu GPU
+      - libxkbcommon0       # gestion clavier Wayland (XKB)
+      - libdbus-1-3         # D-Bus : communication avec les services desktop
+      - libffi8             # FFI : appels de fonctions dynamiques (dep de GLib)
+
+  # libglycin-2 : chargeur d'images GNOME 46 requis par libflutter_linux_gtk.so.
+  # Absent des dépôts Ubuntu 24.04 (core24) — bundlé depuis le host Ubuntu 26.04.
+  # build-snap.sh copie la lib dans libs/ avant d'invoquer snapcraft.
+  # Ses dépendances transitives (GLib, GIO, lcms2…) sont toutes dans gnome-46-2404.
+  glycin-runtime:
+    plugin: dump
+    source: libs
+    source-type: local
+    organize:
+      'libglycin-2.so.0': usr/lib/x86_64-linux-gnu/libglycin-2.so.0
+
+  # X11 client libs requises par libflutter_linux_gtk.so → GTK3 → X11 stack.
+  # Le content snap gnome-46-2404 fournit GTK3 mais pas ces libs bas niveau.
+  x11-runtime:
+    plugin: nil
+    stage-packages:
+      - libx11-6       # client X11 de base (connexion au serveur X)
+      - libxext6       # extensions X11 (XSHM, double-buffer…)
+      - libxi6         # X Input : souris, tablette, multitouch
+      - libxfixes3     # XFixes : régions d'écran, curseurs composites
+      - libxcursor1    # thèmes de curseur X (PNG)
+      - libxdamage1    # XDamage : notification des zones modifiées
+      - libxcomposite1 # XComposite : rendu hors-écran (transparence)
+      - libxrandr2     # XRandR : multi-écrans, résolution dynamique
+      - libxinerama1   # Xinerama : multi-moniteurs (ancienne API)
+      - libxrender1    # XRender : rendu anti-aliasé côté serveur X
+      - libxres1       # XRes : statistiques ressources X (debug)
+      - libxcb1        # XCB : binding C bas niveau du protocole X
+      - libxcb-render0 # XCB – extension XRender
+      - libxcb-shm0    # XCB – mémoire partagée X (SHM)
+      - libxau6        # authentification X (MIT-MAGIC-COOKIE)
+      - libxdmcp6      # XDMCP : protocole Display Manager Control
+
+  # Outils PDF : pdftoppm (rendu page), pdfinfo (comptage), pdftotext, pdfunite
+  poppler:
+    plugin: nil
+    stage-packages:
+      - poppler-utils  # pdftoppm (rendu), pdfinfo (comptage), pdftotext, pdfunite
+
+  # Python + libs de calcul pour PaddleOCR/FastText/CTranslate2
+  python-env:
+    plugin: nil
+    source: wheels
+    source-type: local
+    build-packages:
+      - python3      # interpréteur Python 3 pour pip au moment du build
+      - python3-pip  # pip pour installer les wheels dans pyenv/
+    stage-packages:
+      - python3.12          # interpréteur Python 3.12 au runtime — même version que les wheels .cpython-312
+      - libpython3.12-stdlib # stdlib complète (json, os, subprocess… requis par paddleocr)
+      - libgomp1             # runtime OpenMP requis par les extensions C de PaddleOCR
+    override-build: |
+      set -e
+      # rapidocr-onnxruntime : OCR via ONNX Runtime (compatible AVX, sans AVX2)
+      # onnxruntime           : moteur d'inférence ONNX (dispatch ISA dynamique)
+      # opencv-python         : traitement d'image pour rapidocr
+      # ctranslate2           : runtime Opus-MT (inférence traduction offline)
+      # sentencepiece         : tokenizer pré/post-traitement Opus-MT
+      # fasttext-wheel        : détection de langue FastText LID (176 langues)
+      pip3 install \
+        --no-cache-dir \
+        --break-system-packages \
+        --no-index \
+        --find-links "$SNAPCRAFT_PART_SRC" \
+        --target "$SNAPCRAFT_PART_INSTALL/pyenv" \
+        rapidocr-onnxruntime \
+        onnxruntime \
+        opencv-python \
+        ctranslate2 \
+        sentencepiece \
+        fasttext-wheel
+
+  # Vérifie au moment du build que toutes les dépendances runtime sont présentes.
+  # Un fichier manquant = build échoue immédiatement avec un message clair,
+  # plutôt qu'un crash silencieux à l'exécution.
+  verify-runtime-deps:
+    plugin: nil
+    after:
+      - launcher
+      - flutter-app
+      - gnome-platform-dir
+      - egl-runtime
+      - wayland-runtime
+      - glycin-runtime
+      - x11-runtime
+      - poppler
+      - python-env
+    override-prime: |
+      set -e
+      ok=0; fail=0
+      check() {
+        local pattern="$1" label="$2"
+        if ls "$SNAPCRAFT_PRIME"/$pattern >/dev/null 2>&1; then
+          echo "  ✅ $label"
+          ok=$((ok+1))
+        else
+          echo "  ❌ MANQUANT : $label  ($pattern)"
+          fail=$((fail+1))
+        fi
+      }
+
+      echo "--- Vérification des dépendances runtime ---"
+      check "bin/launcher"                                                    "script de lancement (GDK-Pixbuf patch)"
+      check "pdf_ocr_translator"                                              "binaire Flutter"
+      check "lib/libflutter_linux_gtk.so"                                     "Flutter GTK engine"
+      check "usr/bin/pdftoppm"                                                "pdftoppm (poppler)"
+      check "usr/bin/pdfinfo"                                                 "pdfinfo (poppler)"
+      check "usr/bin/pdftotext"                                               "pdftotext (texte embarqué)"
+      check "usr/bin/pdfunite"                                                "pdfunite (assemblage PDF)"
+      check "usr/lib/x86_64-linux-gnu/libXfixes.so.3*"                        "libXfixes.so.3 (X11)"
+      check "usr/lib/x86_64-linux-gnu/libX11.so.6*"                          "libX11.so.6 (X11)"
+      check "usr/lib/x86_64-linux-gnu/libwayland-client.so.0*"               "libwayland-client.so.0 (Wayland)"
+      check "usr/lib/x86_64-linux-gnu/libwayland-cursor.so.0*"               "libwayland-cursor.so.0 (Wayland)"
+      check "usr/lib/x86_64-linux-gnu/libxkbcommon.so.0*"                    "libxkbcommon.so.0 (clavier Wayland)"
+      check "usr/lib/x86_64-linux-gnu/libglycin-2.so.0*"                     "libglycin-2.so.0 (chargeur images GNOME 46)"
+      check "usr/lib/x86_64-linux-gnu/libEGL.so.1*"                           "libEGL.so.1 (GLVND)"
+      check "usr/lib/x86_64-linux-gnu/libEGL_mesa.so.0*"                     "libEGL_mesa.so.0 (Mesa EGL)"
+      check "usr/lib/x86_64-linux-gnu/libGLESv2.so.2*"                       "libGLESv2.so.2 (GLES2 renderer Flutter)"
+      check "usr/lib/x86_64-linux-gnu/libGL.so.1*"                           "libGL.so.1 (OpenGL GTK3)"
+      check "usr/share/glvnd/egl_vendor.d/50_mesa.json"                      "EGL ICD (50_mesa.json)"
+      check "usr/lib/x86_64-linux-gnu/libgomp.so*"                           "libgomp (OpenMP)"
+      check "pyenv/rapidocr_onnxruntime*"                                     "rapidocr-onnxruntime (Python)"
+      check "pyenv/onnxruntime*"                                              "onnxruntime (Python)"
+      check "pyenv/ctranslate2*"                                              "ctranslate2 (Python)"
+      check "pyenv/sentencepiece*"                                            "sentencepiece (Python)"
+      check "pyenv/fasttext*"                                                 "fasttext (Python)"
+      check "gnome-platform"                                                  "répertoire montage content snap"
+      echo "--- $ok OK / $fail manquant(s) ---"
+      if [ $fail -gt 0 ]; then
+        echo "❌ Build interrompu : $fail dépendance(s) manquante(s)"
+        exit 1
+      fi

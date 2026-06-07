@@ -1,0 +1,19 @@
+#!/bin/bash
+# Le loaders.cache de gnome-46-2404 contient des chemins absolus (/usr/lib/...)
+# valides dans le content snap mais pas depuis notre snap où le contenu est monté
+# dans $SNAP/gnome-platform. Ce script génère une copie patchée à chaque lancement
+# (sed sur ~15 KB — négligeable) pour que les chemins reflètent toujours la
+# révision courante du snap ($SNAP change à chaque mise à jour).
+
+CACHE_DIR="${SNAP_USER_COMMON}/.cache/gdk-pixbuf-2.0"
+CACHE_FILE="${CACHE_DIR}/loaders.cache"
+ORIGINAL="${SNAP}/gnome-platform/usr/lib/x86_64-linux-gnu/gdk-pixbuf-current/loaders.cache"
+
+if [ -f "${ORIGINAL}" ]; then
+    mkdir -p "${CACHE_DIR}"
+    sed "s|/usr/lib/x86_64-linux-gnu/gdk-pixbuf|${SNAP}/gnome-platform/usr/lib/x86_64-linux-gnu/gdk-pixbuf|g" \
+        "${ORIGINAL}" > "${CACHE_FILE}"
+    export GDK_PIXBUF_MODULE_FILE="${CACHE_FILE}"
+fi
+
+exec "${SNAP}/pdf_ocr_translator" "$@"
