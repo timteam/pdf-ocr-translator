@@ -115,14 +115,32 @@ if [[ "$_SKIP_MODELS" == false ]]; then
   [[ "${_MC,,}" == r* ]] && _CLEAN_FLAG="--clean"
 
   echo ""
-  if ./scripts/prepare_translation_models.sh $_CLEAN_FLAG; then
-    _n_ok=0
+  # Relances automatiques si des modèles échouent (réseau instable)
+  _MAX_BUILD_TRIES=3
+  _build_try=0
+  while [[ $_build_try -lt $_MAX_BUILD_TRIES ]]; do
+    ((_build_try++)) || true
+    ./scripts/prepare_translation_models.sh $_CLEAN_FLAG && break
+    _n_missing=0
     for _d in "$FLUTTER_MODELS_DIR"/*/; do
-      [[ -f "$_d/model/model.bin" ]] && ((_n_ok++)) || true
+      [[ ! -f "$_d/model/model.bin" ]] && ((_n_missing++)) || true
     done
-    echo -e "${GREEN}✅ $_n_ok modèle(s) Opus-MT prêt(s)${NC}"
+    if [[ $_n_missing -eq 0 ]]; then break; fi
+    if [[ $_build_try -lt $_MAX_BUILD_TRIES ]]; then
+      echo -e "${YELLOW}⚠️  $_n_missing modèle(s) manquant(s) — relance $_build_try/$_MAX_BUILD_TRIES dans 5s…${NC}"
+      sleep 5
+      _CLEAN_FLAG=""  # pas de --clean sur les relances, reprend les partiels
+    fi
+  done
+  _n_ok=0; _n_miss=0
+  for _d in "$FLUTTER_MODELS_DIR"/*/; do
+    if [[ -f "$_d/model/model.bin" ]]; then ((_n_ok++)) || true
+    else ((_n_miss++)) || true; fi
+  done
+  if [[ $_n_miss -eq 0 ]]; then
+    echo -e "${GREEN}✅ $_n_ok modèle(s) Opus-MT prêt(s) — complet${NC}"
   else
-    echo -e "${YELLOW}⚠️  Certains modèles n'ont pas pu être téléchargés — traduction partielle${NC}"
+    echo -e "${YELLOW}⚠️  $_n_ok prêt(s), $_n_miss manquant(s) — traduction partielle${NC}"
   fi
 fi
 
@@ -158,7 +176,9 @@ BUNDLE="build/linux/x64/release/bundle/pdf_ocr_translator"
 NEEDS_FLUTTER_BUILD=false
 if [[ ! -f "$BUNDLE" ]]; then
   NEEDS_FLUTTER_BUILD=true
-elif find lib assets pubspec.yaml -newer "$BUNDLE" -print -quit 2>/dev/null | grep -q .; then
+elif find lib assets pubspec.yaml -newer "$BUNDLE" \
+        -not -path "assets/translation_models/*" \
+        -print -quit 2>/dev/null | grep -q .; then
   NEEDS_FLUTTER_BUILD=true
 fi
 

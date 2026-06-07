@@ -40,8 +40,42 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", _N_THREADS)
 
 import json
 import gc
+import unicodedata
 
 _CHUNK_SIZE = 32  # Opus-MT est bien plus léger que NLLB — chunks plus grands
+
+# Caractères Unicode non rendus par les polices PDF standard
+_INVISIBLE = (
+    '­'  # SOFT HYPHEN
+    '​'  # ZERO WIDTH SPACE
+    '‌'  # ZERO WIDTH NON-JOINER
+    '‍'  # ZERO WIDTH JOINER
+    '⁠'  # WORD JOINER
+    '﻿'  # BOM / ZERO WIDTH NO-BREAK SPACE
+    '⁡''⁢''⁣''⁤'  # invisible math operators
+)
+_SPACE_VARIANTS = (
+    ' '  # NO-BREAK SPACE
+    '·'  # MIDDLE DOT (artefact SentencePiece Opus-MT)
+    ' '  # THIN SPACE
+    ' '  # NARROW NO-BREAK SPACE
+    ' '  # FIGURE SPACE
+    ' '  # PUNCTUATION SPACE
+    ' '  # MEDIUM MATHEMATICAL SPACE
+    '　'  # IDEOGRAPHIC SPACE
+)
+
+def _clean(text: str) -> str:
+    """Normalise le texte pour éviter les caractères non supportés par les polices PDF."""
+    text = unicodedata.normalize('NFKC', text)
+    for ch in _INVISIBLE:
+        text = text.replace(ch, '')
+    for ch in _SPACE_VARIANTS:
+        text = text.replace(ch, ' ')
+    # Collapse les espaces multiples
+    import re as _re
+    text = _re.sub(r' {2,}', ' ', text)
+    return text.strip()
 
 
 def _log(msg):
@@ -102,7 +136,7 @@ def _translate_lines(
         _log(f"PROGRESS:{progress_offset + done}/{total_ops}")
         _log(f"  {dt:.1f}s — {dt/len(chunk):.2f}s/seg")
         for r in out:
-            results.append(sp.decode(r.hypotheses[0]))
+            results.append(_clean(sp.decode(r.hypotheses[0])))
         del out, encoded
         gc.collect()
 

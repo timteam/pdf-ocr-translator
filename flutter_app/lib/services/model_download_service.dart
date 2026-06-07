@@ -103,11 +103,18 @@ class ModelDownloadService {
 
       // Vérification de la structure
       final modelBin = File(p.join(extractRoot.path, 'model', 'model.bin'));
-      final spmFile = File(p.join(extractRoot.path, 'sentencepiece.model'));
-      if (!await modelBin.exists() || !await spmFile.exists()) {
-        throw Exception(
-          'Structure .argosmodel inattendue — model/model.bin ou sentencepiece.model manquant',
-        );
+      if (!await modelBin.exists()) {
+        throw Exception('Structure .argosmodel inattendue — model/model.bin manquant');
+      }
+
+      // Localise le fichier tokenizer (nom variable selon le modèle)
+      File? spmFile;
+      for (final name in ['sentencepiece.model', 'bpe.model', 'source.spm', 'tok.model']) {
+        final f = File(p.join(extractRoot.path, name));
+        if (await f.exists()) { spmFile = f; break; }
+      }
+      if (spmFile == null) {
+        throw Exception('Structure .argosmodel inattendue — tokenizer introuvable');
       }
 
       // Copie dans targetDir

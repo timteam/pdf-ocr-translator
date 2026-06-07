@@ -142,15 +142,48 @@ for pair in "${REQUESTED_PAIRS[@]}"; do
   EXTRACT="/tmp/argos_extract_${pair}"
 
   echo -e "${BLUE}↓  $pair${NC} — ${URL##*/}"
-  if ! curl -fL --progress-bar "$URL" -o "$ZIP"; then
-    echo -e "${RED}❌ Téléchargement échoué : $pair${NC}"
+
+  # Téléchargement avec retries et reprise automatique
+  _MAX_TRIES=3
+  _try=0
+  _dl_ok=false
+  while [[ $_try -lt $_MAX_TRIES ]]; do
+    ((_try++)) || true
+    # -C - : reprend un téléchargement partiel si le zip existe déjà
+    # --retry 3 --retry-delay 2 : retries réseau intra-curl
+    if curl -fL --progress-bar --retry 3 --retry-delay 2 \
+            --connect-timeout 30 --max-time 600 \
+            -C - "$URL" -o "$ZIP" 2>&1; then
+      # Vérifie l'intégrité du zip avant d'extraire
+      if unzip -t "$ZIP" &>/dev/null; then
+        _dl_ok=true
+        break
+      else
+        echo -e "${YELLOW}   ⚠  Tentative $_try/$_MAX_TRIES — zip corrompu, re-téléchargement complet${NC}"
+        rm -f "$ZIP"  # supprime le partiel corrompu pour forcer un téléchargement neuf
+      fi
+    else
+      echo -e "${YELLOW}   ⚠  Tentative $_try/$_MAX_TRIES — erreur curl${NC}"
+      rm -f "$ZIP"
+      [[ $_try -lt $_MAX_TRIES ]] && sleep $((2 ** _try))
+    fi
+  done
+
+  if [[ "$_dl_ok" == false ]]; then
+    echo -e "${RED}❌ $pair — téléchargement échoué après $_MAX_TRIES tentatives${NC}"
+    rm -f "$ZIP"
     ((failed++)) || true
     continue
   fi
 
   rm -rf "$EXTRACT"
   mkdir -p "$EXTRACT"
-  unzip -q "$ZIP" -d "$EXTRACT"
+  if ! unzip -q "$ZIP" -d "$EXTRACT"; then
+    echo -e "${RED}❌ $pair — extraction échouée${NC}"
+    rm -f "$ZIP"; rm -rf "$EXTRACT"
+    ((failed++)) || true
+    continue
+  fi
   rm -f "$ZIP"
 
   # Le zip peut contenir un sous-dossier racine — on l'aplatit
@@ -170,9 +203,25 @@ for pair in "${REQUESTED_PAIRS[@]}"; do
     continue
   fi
 
+  # Localise le fichier tokenizer (nom variable selon le modèle)
+  SPM_SRC=""
+  for _name in sentencepiece.model bpe.model source.spm tok.model; do
+    if [[ -f "$EXTRACT_ROOT/$_name" ]]; then
+      SPM_SRC="$EXTRACT_ROOT/$_name"
+      break
+    fi
+  done
+  if [[ -z "$SPM_SRC" ]]; then
+    echo -e "${RED}❌ $pair — tokenizer introuvable (sentencepiece.model / bpe.model manquant)${NC}"
+    ls -la "$EXTRACT_ROOT/" || true
+    rm -rf "$EXTRACT"
+    ((failed++)) || true
+    continue
+  fi
+
   mkdir -p "$OUT_DIR"
   cp -r "$EXTRACT_ROOT/model" "$OUT_DIR/"
-  cp "$EXTRACT_ROOT/sentencepiece.model" "$OUT_DIR/"
+  cp "$SPM_SRC" "$OUT_DIR/sentencepiece.model"
   [[ -f "$EXTRACT_ROOT/metadata.json" ]] && cp "$EXTRACT_ROOT/metadata.json" "$OUT_DIR/"
   touch "$OUT_DIR/.gitkeep"
   rm -rf "$EXTRACT"

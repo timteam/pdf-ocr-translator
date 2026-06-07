@@ -77,6 +77,17 @@ parts:
     stage:
       - '*'
 
+  # Modèles Opus-MT (CTranslate2) — copiés directement dans le snap
+  # car Flutter ne bundle pas récursivement les sous-dossiers d'assets.
+  # Destination : $SNAP/data/flutter_assets/assets/translation_models/{lang}/
+  # ce qui correspond au chemin vérifié par isModelDirAvailable() côté Dart.
+  translation-models:
+    plugin: dump
+    source: ./flutter_app/assets/translation_models
+    source-type: local
+    organize:
+      '*': data/flutter_assets/assets/translation_models/
+
   # Répertoire de montage pour le content snap gnome-46-2404 (doit exister)
   gnome-platform-dir:
     plugin: nil
