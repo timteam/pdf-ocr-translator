@@ -427,7 +427,8 @@ def is_latin_or_empty(text):
 
 
 def run_detect(image_path):
-    img_input = preprocess_for_rapidocr(image_path) or image_path
+    _preprocessed = preprocess_for_rapidocr(image_path)
+    img_input = _preprocessed if _preprocessed is not None else image_path
 
     # ── Passe 1 : modèle ch ───────────────────────────────────────────────────
     dbg("passe 1 : ch")
@@ -470,7 +471,8 @@ def run_detect(image_path):
 def run_ocr(image_path, bcp47_lang):
     model_key = LANG_TO_MODEL.get(bcp47_lang, "ch")
     dbg(f"run_ocr : lang={bcp47_lang} → model={model_key}")
-    img_input = preprocess_for_rapidocr(image_path) or image_path
+    _preprocessed = preprocess_for_rapidocr(image_path)
+    img_input = _preprocessed if _preprocessed is not None else image_path
     ocr = make_ocr(model_key)
     dbg("run_ocr : predict…")
     result, _ = ocr(img_input)

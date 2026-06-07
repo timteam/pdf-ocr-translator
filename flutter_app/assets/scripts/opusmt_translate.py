@@ -177,9 +177,18 @@ def main():
         sys.exit(f"JSON invalide : {e}")
     _log(f"{len(texts)} segment(s) reçus")
 
-    # Sépare les textes non-vides pour ne pas perdre les positions
+    # Sépare les textes non-vides pour ne pas perdre les positions.
+    # Les segments purement ASCII (chiffres, codes produit, identifiants) sont
+    # retournés tels quels — le modèle ja-en produit <unk> sur de l'ASCII pur.
     non_empty = [(i, t.strip()) for i, t in enumerate(texts) if t.strip()]
-    src_lines = [t for _, t in non_empty]
+    to_translate = [(i, t) for i, t in non_empty if not all(ord(c) < 128 for c in t)]
+    passthrough  = {i: t for i, t in non_empty if all(ord(c) < 128 for c in t)}
+
+    n_pass = len(passthrough)
+    if n_pass:
+        _log(f"{n_pass} segment(s) ASCII passthrough (codes, chiffres…)")
+
+    src_lines = [t for _, t in to_translate]
     total_ops = len(src_lines) * (2 if pivot else 1)
 
     _log(f"{len(src_lines)} lignes à traduire (total_ops={total_ops})…")
@@ -201,8 +210,10 @@ def main():
 
     # ── Reconstruction dans l'ordre original ──────────────────────────────────
     output = list(texts)  # copie avec les vides conservés
-    for (orig_i, _), translated in zip(non_empty, final):
+    for (orig_i, _), translated in zip(to_translate, final):
         output[orig_i] = translated
+    for orig_i, t in passthrough.items():
+        output[orig_i] = t
 
     _log(f"Terminé ({len(output)} résultats) — écriture stdout…")
     json.dump(output, sys.stdout, ensure_ascii=False)
