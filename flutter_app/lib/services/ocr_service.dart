@@ -535,7 +535,9 @@ class OCRService {
       }
     }
 
-    if (meaningful < 3) return true;
+    // Autorise les blocs de 2 caractères entièrement significatifs (ex: "軽油", "注意")
+    final isPure2 = meaningful == 2 && nonSpace.length == 2;
+    if (!isPure2 && meaningful < 3) return true;
     if ((nonSpace.length - meaningful) / nonSpace.length > 0.4) return true;
 
     for (final entry in charFreq.entries) {

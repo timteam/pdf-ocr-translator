@@ -225,6 +225,129 @@ def result_to_blocks(result, min_conf=0.5):
     return blocks
 
 
+# =============================================================================
+# LAYOUT ANALYSIS — fusion spatiale des blocs OCR
+#
+# DBNet sur-segmente parfois le texte (ex : caractères isolés dans les légendes,
+# texte vertical, tableaux). Cette étape regroupe les boîtes voisines qui
+# appartiennent à la même ligne de texte avant le filtre garbage côté Dart.
+#
+# Deux passes :
+#   1. Horizontale : même ligne (chevauchement vertical ≥ 40 % de la hauteur min)
+#      + gap horizontal ≤ 1,5 × hauteur min → concaténation gauche→droite.
+#   2. Verticale  : même colonne (chevauchement horizontal ≥ 30 % de la largeur min)
+#      + gap vertical ≤ 1,0 × hauteur du bloc → concaténation haut→bas
+#      (utile pour le texte vertical japonais fragmenté).
+# =============================================================================
+
+def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio):
+    """
+    Fusionne les blocs proches sur un axe donné.
+    axis='h' → même ligne (merge horizontal) ; axis='v' → même colonne (merge vertical).
+    """
+    if not blocks:
+        return blocks
+
+    if axis == 'h':
+        primary_sort  = lambda b: (b['top'],  b['left'])
+        primary_size  = lambda b: b['bottom'] - b['top']      # hauteur
+        primary_lo    = lambda b: b['top']
+        primary_hi    = lambda b: b['bottom']
+        secondary_lo  = lambda b: b['left']
+        secondary_hi  = lambda b: b['right']
+        text_order    = lambda g: sorted(g, key=lambda b: b['left'])
+    else:  # 'v'
+        primary_sort  = lambda b: (b['left'],  b['top'])
+        primary_size  = lambda b: b['right'] - b['left']      # largeur
+        primary_lo    = lambda b: b['left']
+        primary_hi    = lambda b: b['right']
+        secondary_lo  = lambda b: b['top']
+        secondary_hi  = lambda b: b['bottom']
+        text_order    = lambda g: sorted(g, key=lambda b: b['top'])
+
+    sorted_blocks = sorted(blocks, key=primary_sort)
+    used = [False] * len(sorted_blocks)
+    groups = []
+
+    for i, b1 in enumerate(sorted_blocks):
+        if used[i]:
+            continue
+        group = [b1]
+        used[i] = True
+        s1 = primary_size(b1)
+
+        for j in range(i + 1, len(sorted_blocks)):
+            if used[j]:
+                continue
+            b2 = sorted_blocks[j]
+            s2 = primary_size(b2)
+            min_s = min(s1, s2)
+
+            # Chevauchement sur l'axe principal (même ligne / même colonne)
+            overlap = min(primary_hi(b1), primary_hi(b2)) - max(primary_lo(b1), primary_lo(b2))
+            if overlap < min_s * overlap_min_ratio:
+                continue
+
+            # Proximité sur l'axe secondaire (gap entre les deux boîtes)
+            gap = secondary_lo(b2) - secondary_hi(b1)
+            if gap < 0 or gap > min_s * gap_max_ratio:
+                continue
+
+            group.append(b2)
+            used[j] = True
+
+        groups.append(group)
+
+    merged = []
+    for group in groups:
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        ordered = text_order(group)
+        sep = '' if axis == 'v' else ' '
+        text  = sep.join(b['text'] for b in ordered)
+        conf  = min(b['confidence'] for b in ordered)
+        merged.append({
+            'text':       text,
+            'confidence': conf,
+            'left':   min(b['left']   for b in ordered),
+            'top':    min(b['top']    for b in ordered),
+            'right':  max(b['right']  for b in ordered),
+            'bottom': max(b['bottom'] for b in ordered),
+        })
+    return merged
+
+
+def layout_analysis(blocks):
+    """
+    Applique les deux passes de fusion spatiale et filtre les boîtes trop petites.
+    Paramètres conservateurs pour ne pas fusionner du texte de colonnes différentes.
+    """
+    MIN_AREA = 800  # px² — élimine les artéfacts de détection sub-caractère
+
+    filtered = [b for b in blocks
+                if (b['right'] - b['left']) * (b['bottom'] - b['top']) >= MIN_AREA]
+
+    # Passe 1 : fusion horizontale (même ligne de texte)
+    merged = _merge_pass(filtered,
+                         axis='h',
+                         gap_max_ratio=1.5,     # gap ≤ 1,5 × hauteur
+                         overlap_min_ratio=0.4) # chevauchement vertical ≥ 40 %
+
+    # Passe 2 : fusion verticale (texte vertical japonais, listes)
+    merged = _merge_pass(merged,
+                         axis='v',
+                         gap_max_ratio=1.0,     # gap ≤ 1,0 × largeur
+                         overlap_min_ratio=0.3) # chevauchement horizontal ≥ 30 %
+
+    n_in  = len(blocks)
+    n_out = len(merged)
+    if n_in != n_out:
+        dbg(f"layout_analysis : {n_in} blocs → {n_out} après fusion spatiale")
+
+    return merged
+
+
 def detect_dominant_script(text):
     counts = {
         "hiragana": 0, "katakana": 0, "cjk": 0, "hangul": 0,
@@ -323,14 +446,14 @@ def run_detect(image_path):
 def run_ocr(image_path, bcp47_lang):
     model_key = LANG_TO_MODEL.get(bcp47_lang, "ch")
     dbg(f"run_ocr : lang={bcp47_lang} → model={model_key}")
-    # Préprocessing adaptatif : retourne np.ndarray BGR ou None
-    # Si None → RapidOCR charge l'original via PIL (légère conversion RGB→BGR interne)
     img_input = preprocess_for_rapidocr(image_path) or image_path
     ocr = make_ocr(model_key)
     dbg("run_ocr : predict…")
     result, _ = ocr(img_input)
     dbg("run_ocr : predict OK")
     blocks = result_to_blocks(result)
+    dbg(f"run_ocr : {len(blocks)} blocs bruts")
+    blocks = layout_analysis(blocks)
     dbg(f"run_ocr : {len(blocks)} blocs")
     json.dump(blocks, sys.stdout, ensure_ascii=False)
 
