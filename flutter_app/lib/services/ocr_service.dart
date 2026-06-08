@@ -518,7 +518,12 @@ class OCRService {
     final nonSpace = stripped.replaceAll(' ', '');
     if (nonSpace.isEmpty) return true;
 
+    // P2c — artefacts d'encodage Latin-1/UTF-8 : séquences ã», â·, ï¼ etc.
+    // Ces patterns n'apparaissent que dans du texte corrompu par double-encodage.
+    if (RegExp(r'[ãâ][»·\x80-\xBF]|ï¼|ï½').hasMatch(stripped)) return true;
+
     int meaningful = 0;
+    bool hasJapanese = false;
     final charFreq = <String, int>{};
     for (final rune in stripped.runes) {
       final c = String.fromCharCode(rune);
@@ -533,12 +538,29 @@ class OCRService {
           (rune >= 0x4E00 && rune <= 0x9FFF)) {
         meaningful++;
       }
+      if ((rune >= 0x3040 && rune <= 0x309F) ||   // hiragana
+          (rune >= 0x30A0 && rune <= 0x30FF) ||   // katakana
+          (rune >= 0xFF65 && rune <= 0xFF9F) ||   // katakana ½-largeur
+          (rune >= 0x4E00 && rune <= 0x9FFF)) {   // CJK
+        hasJapanese = true;
+      }
     }
 
     // Autorise les blocs de 2 caractères entièrement significatifs (ex: "軽油", "注意")
     final isPure2 = meaningful == 2 && nonSpace.length == 2;
     if (!isPure2 && meaningful < 3) return true;
     if ((nonSpace.length - meaningful) / nonSpace.length > 0.4) return true;
+
+    // P2a — bloc sans japonais commençant par un symbole non alphanumérique :
+    // artefacts de filets, points de conduite d'index, fragments de numéros de page.
+    // Ex : "-14726,55-85ISU", ":u.41", "·1617", "─63-66-94"
+    if (!hasJapanese) {
+      final firstRune = nonSpace.runes.first;
+      final startsWithSymbol = !(firstRune >= 0x30 && firstRune <= 0x39) &&  // pas chiffre
+                               !(firstRune >= 0x41 && firstRune <= 0x5A) &&  // pas majuscule
+                               !(firstRune >= 0x61 && firstRune <= 0x7A);    // pas minuscule
+      if (startsWithSymbol) return true;
+    }
 
     for (final entry in charFreq.entries) {
       if (entry.key != '.' && entry.value > 4 && entry.value / nonSpace.length > 0.5) {

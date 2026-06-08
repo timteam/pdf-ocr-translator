@@ -16,9 +16,11 @@ Préprocessing :
 """
 import sys
 import os
+import re
 import json
 import traceback
 import io
+import unicodedata
 import numpy as np
 from pathlib import Path
 
@@ -203,6 +205,25 @@ def result_to_text(result, min_conf=0.4):
     return " ".join(parts)
 
 
+# Traits Unicode souvent lus à la place d'un tiret dans les codes produit Iseki
+# (ex : "1668一904-007-1" → "1668-904-007-1")
+_CJK_DASH_RE = re.compile(
+    r'(?<=\d)[一ー―–—－](?=\d)'
+)
+
+
+def _normalize_block_text(text: str) -> str:
+    """Nettoyage léger du texte OCR brut avant export.
+
+    - NFKC : convertit fullwidth (ＡＢ→AB, １２→12), ligatures, etc.
+    - Remplace les caractères CJK/tirets Unicode glissés entre chiffres par '-'
+      (artefact fréquent dans les codes produit de type 1668-904-007-1).
+    """
+    text = unicodedata.normalize('NFKC', text)
+    text = _CJK_DASH_RE.sub('-', text)
+    return text
+
+
 def result_to_blocks(result, min_conf=0.5):
     if not result:
         return []
@@ -215,7 +236,7 @@ def result_to_blocks(result, min_conf=0.5):
         xs = [p[0] for p in box_points]
         ys = [p[1] for p in box_points]
         blocks.append({
-            "text": text.strip(),
+            "text": _normalize_block_text(text.strip()),
             "confidence": conf,
             "left": min(xs),
             "top": min(ys),
@@ -332,6 +353,21 @@ def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None)
     return merged
 
 
+def _is_index_page(blocks):
+    """Heuristique : page de type index/table des matières.
+
+    Caractéristiques : beaucoup de petits blocs étroits (termes + numéros de page
+    séparés par des points de conduite). Déclenche une passe verticale agressive
+    pour regrouper les termes multi-lignes d'un même article d'index.
+    """
+    if len(blocks) < 30:
+        return False
+    widths = [b['right'] - b['left'] for b in blocks]
+    avg_w = sum(widths) / len(widths)
+    narrow = sum(1 for w in widths if w < 700)  # < ~30 mm à 600 DPI
+    return narrow / len(widths) > 0.45 and avg_w < 900
+
+
 def layout_analysis(blocks):
     """
     Applique les deux passes de fusion spatiale et filtre les boîtes trop petites.
@@ -363,6 +399,17 @@ def layout_analysis(blocks):
                          gap_max_ratio=1.0,
                          overlap_min_ratio=0.3,
                          max_gap_px=80)
+
+    # Passe 3 (page index) : fusion verticale complémentaire avec chevauchement strict
+    # pour regrouper les entrées d'index fragmentées sur plusieurs lignes.
+    if _is_index_page(merged):
+        n_before = len(merged)
+        merged = _merge_pass(merged,
+                             axis='v',
+                             gap_max_ratio=0.4,
+                             overlap_min_ratio=0.55,
+                             max_gap_px=25)
+        dbg(f"layout_analysis (index) : passe 3 : {n_before} → {len(merged)}")
 
     n_in  = len(blocks)
     n_out = len(merged)

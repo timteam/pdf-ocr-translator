@@ -72,7 +72,23 @@ def _clean(text: str) -> str:
         for ch in text
     )
     text = re.sub(r' {2,}', ' ', text)
+    # Supprime les artefacts typographiques parasites introduits par le modèle en début de texte
+    # (†, ‡ de filets de page ; ' " de bordures ovales ; • · de puces OCR)
+    text = re.sub(r'^[†‡‘’“”•·‧]+\s*', '', text)
     return text.strip()
+
+
+def _has_japanese(text: str) -> bool:
+    """Retourne True si le texte contient du japonais/CJK traduisible par le modèle ja→en."""
+    for ch in text:
+        cp = ord(ch)
+        if (0x3040 <= cp <= 0x30FA or   # hiragana + katakana (sans ・ U+30FB)
+                0x30FC <= cp <= 0x30FF or   # katakana suite (ー ヾ ヿ)
+                0xFF65 <= cp <= 0xFF9F or   # katakana demi-largeur
+                0x4E00 <= cp <= 0x9FFF or   # CJK unifiés
+                0x3400 <= cp <= 0x4DBF):    # CJK extension A
+            return True
+    return False
 
 
 def _log(msg):
@@ -181,12 +197,16 @@ def main():
     # Les segments purement ASCII (chiffres, codes produit, identifiants) sont
     # retournés tels quels — le modèle ja-en produit <unk> sur de l'ASCII pur.
     non_empty = [(i, t.strip()) for i, t in enumerate(texts) if t.strip()]
-    to_translate = [(i, t) for i, t in non_empty if not all(ord(c) < 128 for c in t)]
-    passthrough  = {i: t for i, t in non_empty if all(ord(c) < 128 for c in t)}
+    # Passthrough : segments ASCII purs OU sans aucun caractère japonais/CJK.
+    # Le modèle ja→en produit <unk> sur du texte sans japonais → résultat "? ? ?".
+    to_translate = [(i, t) for i, t in non_empty
+                    if not all(ord(c) < 128 for c in t) and _has_japanese(t)]
+    passthrough  = {i: t for i, t in non_empty
+                    if all(ord(c) < 128 for c in t) or not _has_japanese(t)}
 
     n_pass = len(passthrough)
     if n_pass:
-        _log(f"{n_pass} segment(s) ASCII passthrough (codes, chiffres…)")
+        _log(f"{n_pass} segment(s) passthrough (ASCII ou sans contenu japonais)")
 
     src_lines = [t for _, t in to_translate]
     total_ops = len(src_lines) * (2 if pivot else 1)
