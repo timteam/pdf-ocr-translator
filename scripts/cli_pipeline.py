@@ -310,6 +310,47 @@ def translate_blocks(
 
 # ─── Rapport par page ─────────────────────────────────────────────────────────
 
+def _box_iou(a: dict, b: dict) -> float:
+    """IoU entre deux bounding boxes de blocs OCR."""
+    ix1 = max(a.get("left", 0),   b.get("left", 0))
+    iy1 = max(a.get("top", 0),    b.get("top", 0))
+    ix2 = min(a.get("right", 0),  b.get("right", 0))
+    iy2 = min(a.get("bottom", 0), b.get("bottom", 0))
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area_a = (a.get("right",0) - a.get("left",0)) * (a.get("bottom",0) - a.get("top",0))
+    area_b = (b.get("right",0) - b.get("left",0)) * (b.get("bottom",0) - b.get("top",0))
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def analyse_layout(blocks: list[dict], page: int) -> dict:
+    """Analyse le placement des blocs : chevauchements, densité, distribution."""
+    n = len(blocks)
+    overlaps = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            iou = _box_iou(blocks[i], blocks[j])
+            if iou > 0.05:
+                overlaps.append({
+                    "i": i, "j": j, "iou": round(iou, 3),
+                    "text_i": blocks[i].get("text", "")[:30],
+                    "text_j": blocks[j].get("text", "")[:30],
+                })
+    overlaps.sort(key=lambda o: -o["iou"])
+    severe  = [o for o in overlaps if o["iou"] > 0.30]
+    moderate = [o for o in overlaps if 0.10 < o["iou"] <= 0.30]
+    return {
+        "page": page,
+        "n_blocks": n,
+        "overlaps_severe":   len(severe),
+        "overlaps_moderate": len(moderate),
+        "worst_iou": overlaps[0]["iou"] if overlaps else 0.0,
+        "details": overlaps[:10],  # top 10
+    }
+
+
 def write_page_report(
     page: int,
     lang_src: str,
@@ -318,18 +359,39 @@ def write_page_report(
     translations: list[str],
     out_dir: Path,
     timings: dict,
-) -> None:
-    """Écrit un rapport lisible côte à côte (original → traduction)."""
+) -> dict:
+    """Écrit un rapport lisible côte à côte + analyse de placement.
+
+    Retourne le dict d'analyse de layout.
+    """
+    layout = analyse_layout(ocr_blocks, page)
+
     lines = [
         f"=== Page {page} | {lang_src} → {lang_tgt} ===",
         f"OCR : {len(ocr_blocks)} blocs  |  "
         f"Rendu: {timings.get('render', 0):.1f}s  "
         f"OCR: {timings.get('ocr', 0):.1f}s  "
         f"Trad: {timings.get('translate', 0):.1f}s",
+        f"Layout : chevauchements sévères={layout['overlaps_severe']}  "
+        f"modérés={layout['overlaps_moderate']}  "
+        f"pire IoU={layout['worst_iou']:.2f}",
         "",
     ]
+
+    if layout["overlaps_severe"]:
+        lines.append("⚠ CHEVAUCHEMENTS SÉVÈRES (IoU>0.30) :")
+        for o in layout["details"]:
+            if o["iou"] > 0.30:
+                lines.append(f"  Blocs {o['i']+1}↔{o['j']+1}  IoU={o['iou']:.2f}"
+                             f"  «{o['text_i']}» ↔ «{o['text_j']}»")
+        lines.append("")
+
     for i, (blk, trad) in enumerate(zip(ocr_blocks, translations)):
-        bb = f"  [{blk.get('left',0):.0f},{blk.get('top',0):.0f} {blk.get('right',0)-blk.get('left',0):.0f}×{blk.get('bottom',0)-blk.get('top',0):.0f}px]"
+        left   = blk.get("left",   0)
+        top    = blk.get("top",    0)
+        right  = blk.get("right",  0)
+        bottom = blk.get("bottom", 0)
+        bb = f"  [{left:.0f},{top:.0f} {right-left:.0f}×{bottom-top:.0f}px]"
         orig = blk.get("text", "")
         conf = blk.get("confidence", 0.0)
         lines += [
@@ -341,6 +403,7 @@ def write_page_report(
     (out_dir / f"page_{page}_report.txt").write_text(
         "\n".join(lines), encoding="utf-8"
     )
+    return layout
 
 
 # ─── Pipeline par PDF ─────────────────────────────────────────────────────────
@@ -377,6 +440,8 @@ def process_pdf(
         "pages_processed": 0,
         "total_blocks": 0,
         "empty_translations": 0,
+        "total_overlaps_severe": 0,
+        "total_overlaps_moderate": 0,
         "errors": [],
         "timing_total": 0.0,
     }
@@ -465,17 +530,21 @@ def process_pdf(
                 json.dumps(result_blocks, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-            write_page_report(
+            layout = write_page_report(
                 page, effective_src, tgt_lang,
                 ocr_blocks, translations, out_dir, timings,
             )
 
-            stats["pages_processed"] += 1
-            stats["total_blocks"]      += len(ocr_blocks)
-            stats["empty_translations"] += empty
+            stats["pages_processed"]      += 1
+            stats["total_blocks"]          += len(ocr_blocks)
+            stats["empty_translations"]    += empty
+            stats["total_overlaps_severe"] += layout["overlaps_severe"]
+            stats["total_overlaps_moderate"] += layout["overlaps_moderate"]
 
             duration = sum(timings.values())
-            print(f"    → {len(ocr_blocks)} blocs | {empty} trad. vides | {duration:.1f}s")
+            overlap_warn = (f" | ⚠ {layout['overlaps_severe']} chevauch. sévères"
+                           if layout["overlaps_severe"] else "")
+            print(f"    → {len(ocr_blocks)} blocs | {empty} trad. vides | {duration:.1f}s{overlap_warn}")
 
     stats["timing_total"] = time.time() - t0_total
 
@@ -485,6 +554,8 @@ def process_pdf(
         f"Pages traitées    : {stats['pages_processed']} / {p_end - p_start + 1}",
         f"Blocs totaux      : {stats['total_blocks']}",
         f"Trad. vides       : {stats['empty_translations']}",
+        f"Chevauch. sévères : {stats['total_overlaps_severe']}",
+        f"Chevauch. modérés : {stats['total_overlaps_moderate']}",
         f"Durée totale      : {stats['timing_total']:.1f}s",
     ]
     if stats["errors"]:
@@ -585,20 +656,24 @@ def main() -> None:
         all_stats.append(stats)
 
     # Résumé global
-    total_pages = sum(s["pages_processed"] for s in all_stats)
-    total_blocks = sum(s["total_blocks"] for s in all_stats)
-    total_empty  = sum(s["empty_translations"] for s in all_stats)
-    total_errors = sum(len(s["errors"]) for s in all_stats)
+    total_pages    = sum(s["pages_processed"] for s in all_stats)
+    total_blocks   = sum(s["total_blocks"] for s in all_stats)
+    total_empty    = sum(s["empty_translations"] for s in all_stats)
+    total_errors   = sum(len(s["errors"]) for s in all_stats)
+    total_sev_ov   = sum(s.get("total_overlaps_severe", 0) for s in all_stats)
+    total_mod_ov   = sum(s.get("total_overlaps_moderate", 0) for s in all_stats)
     elapsed = time.time() - t0
 
     print(f"\n{'='*60}")
     print(f"RÉSUMÉ GLOBAL")
-    print(f"  PDFs traités : {len(all_stats)}")
-    print(f"  Pages        : {total_pages}")
-    print(f"  Blocs        : {total_blocks}")
-    print(f"  Trad. vides  : {total_empty}")
-    print(f"  Erreurs      : {total_errors}")
-    print(f"  Durée        : {elapsed:.1f}s")
+    print(f"  PDFs traités       : {len(all_stats)}")
+    print(f"  Pages              : {total_pages}")
+    print(f"  Blocs              : {total_blocks}")
+    print(f"  Trad. vides        : {total_empty}")
+    print(f"  Chevauch. sévères  : {total_sev_ov}  (IoU>0.30)")
+    print(f"  Chevauch. modérés  : {total_mod_ov}  (IoU 0.10–0.30)")
+    print(f"  Erreurs            : {total_errors}")
+    print(f"  Durée              : {elapsed:.1f}s")
     print(f"  Sorties      : {out_root}/")
     if total_errors:
         print("\nPDFs avec erreurs :")

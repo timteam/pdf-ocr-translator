@@ -107,8 +107,11 @@ def _is_failed_translation(src: str, translated: str) -> bool:
 
     Critères (un seul suffit) :
       1. Densité de '?' > 20 % — modèle produit <unk> en série
-      2. Ratio longueur sortie / entrée > 6 — hallucination (sortie anormalement longue)
+      2. Ratio longueur : > 3× pour textes sources courts (≤ 10 chars),
+                          > 6× pour textes longs — détecte les hallucinations
       3. N-gramme de 2-3 mots répété > 3 fois — modèle boucle
+      4. Source majoritairement numérique et sortie majoritairement alphabétique
+         (hallucination sur code produit ou numéro de page)
     En cas de détection → le texte source japonais est conservé tel quel.
     """
     t = translated.strip()
@@ -117,7 +120,8 @@ def _is_failed_translation(src: str, translated: str) -> bool:
     # Critère 1 : densité de '?'
     if t.count('?') / max(len(t), 1) > 0.20:
         return True
-    # Critère 2 : ratio longueur
+    # Critère 2 : ratio longueur — hallucination (sortie anormalement longue)
+    # Note : le japonais est très compact, un mot peut se dilater à 6× en français.
     src_len = len(src.replace(' ', ''))
     out_len = len(t.replace(' ', ''))
     if src_len > 10 and out_len / max(src_len, 1) > 6:
@@ -130,38 +134,16 @@ def _is_failed_translation(src: str, translated: str) -> bool:
             for ng in set(ngrams):
                 if ngrams.count(ng) > 3:
                     return True
+    # Critère 4 : source > 40 % chiffres → sortie ne doit pas être majoritairement
+    # alphabétique (détecte les hallucinations sur codes produits / numéros de page)
+    src_digits = sum(1 for c in src if c.isdigit())
+    if src_len > 0 and src_digits / src_len > 0.4:
+        out_alpha = sum(1 for c in t if c.isalpha())
+        if out_alpha / max(len(t), 1) > 0.5:
+            return True
     return False
 
 
-def _load_domain_vocab():
-    """PA7 : charge le vocabulaire domaine depuis domain_vocab.json.
-
-    Le fichier est recherché dans le même répertoire que ce script.
-    Format : [{"pattern": "...", "flags": "i", "replacement": "..."}, ...]
-    Retourne une liste de (compiled_regex, replacement).
-    """
-    vocab_path = Path(__file__).parent / 'domain_vocab.json'
-    if not vocab_path.exists():
-        return []
-    try:
-        import json as _json
-        entries = _json.loads(vocab_path.read_text(encoding='utf-8'))
-        compiled = []
-        for e in entries:
-            flags = re.IGNORECASE if 'i' in e.get('flags', '') else 0
-            compiled.append((re.compile(e['pattern'], flags), e['replacement']))
-        _log(f"PA7: {len(compiled)} règle(s) vocabulaire domaine chargée(s)")
-        return compiled
-    except Exception as exc:
-        _log(f"PA7: domain_vocab.json ignoré ({exc})")
-        return []
-
-
-def _apply_domain_vocab(text: str, vocab: list) -> str:
-    """PA7 : applique le vocabulaire domaine sur un texte traduit."""
-    for pattern, replacement in vocab:
-        text = pattern.sub(replacement, text)
-    return text
 
 
 def _has_japanese(text: str) -> bool:
@@ -225,7 +207,7 @@ def _translate_lines(
         t0 = time.monotonic()
         out = translator.translate_batch(
             encoded,
-            beam_size=2,
+            beam_size=4,
             max_decoding_length=256,
             repetition_penalty=1.2,
             no_repeat_ngram_size=4,
@@ -271,9 +253,6 @@ def main():
     if pivot:
         _log(f"Chargement modèle 2 : {os.path.basename(model_dirs[1])}…")
         tr2, sp2 = _load_model(model_dirs[1])
-
-    # PA7 : chargement du vocabulaire domaine
-    domain_vocab = _load_domain_vocab()
 
     _log("Lecture stdin…")
     try:
@@ -324,10 +303,6 @@ def main():
         final_parts = step2
     else:
         final_parts = step1
-
-    # PA7 : vocabulaire domaine sur chaque segment traduit
-    if domain_vocab:
-        final_parts = [_apply_domain_vocab(t, domain_vocab) for t in final_parts]
 
     # ── Reconstruction dans l'ordre original ──────────────────────────────────
     # Regroupe les sous-segments par indice original (PA2)

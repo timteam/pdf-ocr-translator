@@ -66,11 +66,18 @@ dbg("démarrage")
 
 
 def preprocess_for_rapidocr(image_path):
-    """Préprocessing adaptatif BGR pour RapidOCR. Retourne np.ndarray ou None."""
+    """Préprocessing systématique BGR pour RapidOCR. Retourne np.ndarray ou None.
+
+    Pipeline (toujours appliqué pour les documents scannés) :
+      1. Filtre bilatéral — débruite sans effacer les contours de texte
+      2. CLAHE (16×16 tiles, clipLimit=3) — contraste local fin sur canal L
+      3. Unsharp masking — renforce les arêtes pour DBNet
+      4. PA8 : inversion des bandes sombres (texte clair sur fond sombre)
+    """
     if not OPENCV_AVAILABLE:
         return None
     try:
-        img = cv2.imread(image_path)  # BGR natif — aucune conversion
+        img = cv2.imread(image_path)
         if img is None:
             return None
 
@@ -79,11 +86,27 @@ def preprocess_for_rapidocr(image_path):
         laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         dbg(f"qualité image : contrast={contrast:.1f} laplacian={laplacian_var:.0f}")
 
-        modified = False
+        # 1. Filtre bilatéral — débruite tout en préservant les contours de caractères
+        img = cv2.bilateralFilter(img, d=5, sigmaColor=80, sigmaSpace=80)
+        dbg("filtre bilatéral appliqué")
 
-        # PA8 : inversion des bandes sombres (texte clair sur fond sombre)
-        # Détecte les bandes horizontales dont la luminosité moyenne < 80
-        # (ex : bannière titre "イセキトラクタ" blanche sur fond noir).
+        # 2. CLAHE systématique sur canal L (LAB) avec tuiles fines (16×16)
+        #    Améliore le contraste local même sur des images globalement bien exposées.
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
+        img = cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]),
+                           cv2.COLOR_LAB2BGR)
+        dbg("CLAHE(16×16, clip=3) appliqué")
+
+        # 3. Unsharp masking — renforce les bords pour DBNet
+        if laplacian_var < 300:
+            blur = cv2.GaussianBlur(img, (0, 0), 2.0)
+            img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
+            dbg(f"unsharp masking appliqué (laplacian {laplacian_var:.0f} < 300)")
+
+        # 4. PA8 : inversion des bandes sombres
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         row_means = np.mean(gray, axis=1)
         dark_mask = row_means < 80
         if np.any(dark_mask):
@@ -99,40 +122,11 @@ def preprocess_for_rapidocr(image_path):
                         bands.append((band_start, ri))
             if in_band and n_rows - band_start >= 15:
                 bands.append((band_start, n_rows))
-            if bands:
-                img = img.copy()
-                for b_start, b_end in bands:
-                    img[b_start:b_end] = 255 - img[b_start:b_end]
-                    dbg(f"PA8: inversion bande sombre lignes {b_start}–{b_end} "
-                        f"({b_end - b_start}px)")
-                # Recalcule les métriques après inversion
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                contrast = float(gray.std())
-                laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-                modified = True
+            for b_start, b_end in bands:
+                img[b_start:b_end] = 255 - img[b_start:b_end]
+                dbg(f"PA8: inversion bande sombre lignes {b_start}–{b_end}")
 
-        # CLAHE sur canal L (LAB) — préserve la couleur, améliore le contraste local
-        if contrast < 45:
-            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-            l_ch, a_ch, b_ch = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            img = cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]),
-                               cv2.COLOR_LAB2BGR)
-            dbg(f"CLAHE appliqué (contrast {contrast:.1f} < 45)")
-            modified = True
-
-        # Unsharp masking — renforce les bords pour DBNet
-        if laplacian_var < 150:
-            blur = cv2.GaussianBlur(img, (0, 0), 2.0)
-            img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
-            dbg(f"unsharp masking appliqué (laplacian {laplacian_var:.0f} < 150)")
-            modified = True
-
-        if not modified:
-            dbg("image qualité OK — aucun préprocessing externe appliqué")
-            return None  # RapidOCR lira l'original directement
-
-        return img  # np.ndarray BGR → passé directement à ocr()
+        return img
 
     except Exception as e:
         dbg(f"préprocessing échoué : {e}")
@@ -212,8 +206,11 @@ def make_ocr(model_key):
     dbg(f"make_ocr({model_key})…")
     RapidOCR = import_rapidocr()
     kwargs = dict(MODEL_KWARGS.get(model_key, {}))
-    # Évite pthread_setaffinity_np (non autorisé en confinement snap strict)
     kwargs.setdefault("intra_op_num_threads", os.cpu_count() or 4)
+    # Augmente la résolution effective de détection : sans cela, une image 600 DPI
+    # (~7000 px de haut) est ramenée à ~170 DPI effectifs avant le détecteur DBNet,
+    # ce qui fait rater les petits caractères.
+    kwargs["max_side_len"] = 3000
     try:
         ocr = RapidOCR(**kwargs)
         dbg(f"make_ocr({model_key}) OK")
@@ -282,7 +279,22 @@ def _normalize_block_text(text: str) -> str:
     return text
 
 
-def result_to_blocks(result, min_conf=0.5):
+_PRODUCT_CODE_RE = re.compile(
+    r'^\d{3,6}[－〜\-\s]{1,3}\d{2,4}[－〜\-\s]{1,3}\d{2,4}([－〜\-\s]{1,3}\d{0,4})?[-]?$'
+)
+
+def _is_product_code(text: str) -> bool:
+    """Détecte les codes référence produit.
+    Ex : 1668-904-007-1, 1675〜-903--004〜0, 16-5-905-012
+    """
+    t = text.strip()
+    digits = sum(1 for c in t if c.isdigit())
+    if digits < 4:
+        return False
+    return bool(_PRODUCT_CODE_RE.match(t))
+
+
+def result_to_blocks(result, min_conf=0.55):
     if not result:
         return []
     blocks = []
@@ -395,6 +407,12 @@ def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None,
                 new_lo = min(grp_pri_lo, primary_lo(b2))
                 if new_hi - new_lo > max_result_height_px:
                     continue
+
+            # Isolation codes produit : ne jamais fusionner un code référence
+            # (ex : 1668-904-007-1) avec du texte adjacent — ils constituent
+            # des identifiants autonomes qui ne doivent pas être traduits.
+            if _is_product_code(b1['text']) or _is_product_code(b2['text']):
+                continue
 
             group.append(b2)
             used[j] = True
@@ -592,18 +610,247 @@ def run_detect(image_path):
     json.dump({"text": text_ch, "script": "latin"}, sys.stdout, ensure_ascii=False)
 
 
+def _is_garbage_block(block: dict) -> bool:
+    """Filtre Python miroir de _isGarbageText (Dart) — s'applique avant l'export JSON.
+
+    Élimine les blocs OCR manifestement bruités avant qu'ils n'atteignent le
+    moteur de traduction.  Les critères reproduisent les règles Dart les plus
+    discriminantes (ratio de caractères significatifs, dominance d'un seul
+    caractère, artefacts Latin-1/UTF-8, faux japonais).
+    """
+    text = block.get('text', '').strip()
+    if not text:
+        return True
+
+    non_space = text.replace(' ', '')
+    if not non_space:
+        return True
+
+    # Artefacts double-encodage Latin-1/UTF-8
+    if re.search(r'[ãâ][»·\x80-\xBF]|ï¼|ï½', text):
+        return True
+
+    meaningful = 0
+    has_japanese = False
+    char_freq: dict[str, int] = {}
+    for ch in non_space:
+        cp = ord(ch)
+        char_freq[ch] = char_freq.get(ch, 0) + 1
+        if ((0x41 <= cp <= 0x5A) or (0x61 <= cp <= 0x7A) or
+                (0x30 <= cp <= 0x39) or
+                (0x3040 <= cp <= 0x309F) or (0x30A0 <= cp <= 0x30FF) or
+                (0xFF65 <= cp <= 0xFF9F) or (0x4E00 <= cp <= 0x9FFF)):
+            meaningful += 1
+        if ((0x3040 <= cp <= 0x30FF) or (0xFF65 <= cp <= 0xFF9F) or
+                (0x4E00 <= cp <= 0x9FFF)):
+            has_japanese = True
+
+    # Faux japonais : uniquement ponctuation CJK, pas de kana/kanji réels
+    if has_japanese:
+        has_real = any(
+            (0x3040 <= ord(c) <= 0x30FA) or (0x30FC <= ord(c) <= 0x30FE) or
+            (0xFF65 <= ord(c) <= 0xFF9F) or (0x4E00 <= ord(c) <= 0x9FFF) or
+            (0x3400 <= ord(c) <= 0x4DBF)
+            for c in non_space
+        )
+        if not has_real:
+            return True
+
+    # Ratio de caractères significatifs
+    is_pure_2 = (meaningful == 2 and len(non_space) == 2)
+    if not is_pure_2 and meaningful < 3:
+        return True
+    if (len(non_space) - meaningful) / len(non_space) > 0.4:
+        return True
+
+    # Non-japonais commençant par un symbole non alphanumérique
+    if not has_japanese:
+        first = non_space[0]
+        if not (first.isalpha() or first.isdigit()):
+            return True
+
+    # Dominance d'un seul caractère (> 50 %)
+    for ch, cnt in char_freq.items():
+        if ch != '.' and cnt > 4 and cnt / len(non_space) > 0.5:
+            return True
+
+    # Trop de mots mono-caractère
+    words = text.split()
+    if len(words) >= 3:
+        single_char = sum(1 for w in words if len(w) == 1)
+        if single_char / len(words) > 0.6:
+            return True
+
+    return False
+
+
+def _dedup_by_iou(blocks: list, iou_thresh: float = 0.25) -> list:
+    """Supprime les blocs redondants par IoU. Garde celui avec la meilleure confiance."""
+    keep = [True] * len(blocks)
+    for i in range(len(blocks)):
+        if not keep[i]:
+            continue
+        for j in range(i + 1, len(blocks)):
+            if not keep[j]:
+                continue
+            iou = _box_iou(blocks[i], blocks[j])
+            if iou > iou_thresh:
+                # Garder celui avec la meilleure confiance
+                if blocks[i].get('confidence', 0) >= blocks[j].get('confidence', 0):
+                    keep[j] = False
+                    dbg(f"dedup: drop [{j}] «{blocks[j]['text'][:25]}» (IoU={iou:.2f})")
+                else:
+                    keep[i] = False
+                    dbg(f"dedup: drop [{i}] «{blocks[i]['text'][:25]}» (IoU={iou:.2f})")
+                    break
+    result = [b for b, k in zip(blocks, keep) if k]
+    if len(result) < len(blocks):
+        dbg(f"dedup: {len(blocks)} → {len(result)} blocs ({len(blocks)-len(result)} doublons)")
+    return result
+
+
+def _japanese_ratio(text: str) -> float:
+    """Fraction de caractères japonais/CJK dans le texte."""
+    if not text:
+        return 0.0
+    jp = sum(1 for c in text if (
+        0x3040 <= ord(c) <= 0x30FF or
+        0xFF65 <= ord(c) <= 0xFF9F or
+        0x4E00 <= ord(c) <= 0x9FFF
+    ))
+    return jp / len(text)
+
+
+def _box_iou(a: dict, b: dict) -> float:
+    """IoU entre deux bounding boxes."""
+    ix1 = max(a['left'],   b['left'])
+    iy1 = max(a['top'],    b['top'])
+    ix2 = min(a['right'],  b['right'])
+    iy2 = min(a['bottom'], b['bottom'])
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    area_a = (a['right'] - a['left']) * (a['bottom'] - a['top'])
+    area_b = (b['right'] - b['left']) * (b['bottom'] - b['top'])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _ensemble_blocks(blocks_primary: list, blocks_secondary: list,
+                     iou_thresh: float = 0.35) -> list:
+    """Fusionne deux listes de blocs OCR par IoU spatiale (ensemble model).
+
+    Stratégie :
+      - Pour chaque bloc du modèle primaire (japan), cherche le meilleur
+        correspondant dans le modèle secondaire (ch) par IoU.
+      - Si IoU > seuil, compare les confidences et le ratio japonais :
+          * texte majoritairement japonais → garde primaire
+          * texte alphanumérique → prend le plus confiant des deux
+      - Blocs sans correspondance : gardés tels quels (des deux modèles).
+    """
+    used_secondary = set()
+    result = []
+
+    for pb in blocks_primary:
+        best_iou  = 0.0
+        best_j    = -1
+        for j, sb in enumerate(blocks_secondary):
+            if j in used_secondary:
+                continue
+            iou = _box_iou(pb, sb)
+            if iou > best_iou:
+                best_iou = iou
+                best_j   = j
+
+        if best_iou >= iou_thresh and best_j >= 0:
+            sb = blocks_secondary[best_j]
+            used_secondary.add(best_j)
+            jp_ratio = _japanese_ratio(pb['text'])
+            if jp_ratio >= 0.3:
+                # Texte japonais : le modèle japan est spécialisé → garder
+                result.append(pb)
+                dbg(f"ensemble: jp={jp_ratio:.2f} → japan «{pb['text'][:30]}»")
+            elif sb['confidence'] > pb['confidence'] + 0.05:
+                # Code produit ou alphanumérique : ch plus confiant
+                dbg(f"ensemble: ch+{sb['confidence']:.2f}>{pb['confidence']:.2f} "
+                    f"«{pb['text'][:20]}»→«{sb['text'][:20]}»")
+                result.append({**sb, 'left': pb['left'], 'top': pb['top'],
+                                'right': pb['right'], 'bottom': pb['bottom']})
+            else:
+                result.append(pb)
+        else:
+            result.append(pb)
+
+    # Blocs du modèle secondaire sans correspondance dans le primaire :
+    # uniquement ceux qui ne chevauchent pas les blocs déjà acceptés.
+    for j, sb in enumerate(blocks_secondary):
+        if j in used_secondary:
+            continue
+        overlaps_existing = any(_box_iou(sb, rb) > 0.15 for rb in result)
+        if not overlaps_existing:
+            dbg(f"ensemble: bloc ch orphelin ajouté «{sb['text'][:30]}»")
+            result.append(sb)
+        else:
+            dbg(f"ensemble: bloc ch orphelin ignoré (chevauchement) «{sb['text'][:30]}»")
+
+    return result
+
+
 def run_ocr(image_path, bcp47_lang):
     model_key = LANG_TO_MODEL.get(bcp47_lang, "ch")
     dbg(f"run_ocr : lang={bcp47_lang} → model={model_key}")
     _preprocessed = preprocess_for_rapidocr(image_path)
     img_input = _preprocessed if _preprocessed is not None else image_path
-    ocr = make_ocr(model_key)
-    dbg("run_ocr : predict…")
-    result, _ = ocr(img_input)
+
+    # ── Modèle primaire (spécialisé langue) ───────────────────────────────────
+    ocr_primary = make_ocr(model_key)
+    dbg("run_ocr : predict (primary)…")
+    result_primary, _ = ocr_primary(img_input)
     dbg("run_ocr : predict OK")
-    blocks = result_to_blocks(result)
-    dbg(f"run_ocr : {len(blocks)} blocs bruts")
-    blocks = layout_analysis(blocks)
+    blocks_primary = result_to_blocks(result_primary)
+    dbg(f"run_ocr : {len(blocks_primary)} blocs primaires bruts")
+
+    # ── Ensemble sélectif : modèle ch sur la même image ──────────────────────
+    # Activé uniquement si :
+    #   1. Le modèle primaire n'est pas déjà ch.
+    #   2. La page contient suffisamment de blocs à faible confiance
+    #      (moyenne de confiance < 0.78 ou >15 % de blocs sous 0.70).
+    # → Skip sur les pages à fort texte japonais propre (économise ~15s).
+    if model_key != "ch":
+        n_primary = len(blocks_primary)
+        low_conf_count = sum(1 for b in blocks_primary if b['confidence'] < 0.70)
+        avg_conf = (sum(b['confidence'] for b in blocks_primary) / n_primary
+                    if n_primary else 1.0)
+        run_ensemble = (avg_conf < 0.78 or
+                        (n_primary > 0 and low_conf_count / n_primary > 0.15))
+        dbg(f"ensemble trigger : avg_conf={avg_conf:.2f}  "
+            f"low_conf={low_conf_count}/{n_primary}  run={run_ensemble}")
+
+        if run_ensemble:
+            dbg("run_ocr : predict (ch ensemble)…")
+            ocr_ch = make_ocr("ch")
+            result_ch, _ = ocr_ch(img_input)
+            dbg("run_ocr : predict ch OK")
+            blocks_ch = result_to_blocks(result_ch)
+            dbg(f"run_ocr : {len(blocks_ch)} blocs ch bruts")
+            blocks_raw = _ensemble_blocks(blocks_primary, blocks_ch)
+            dbg(f"run_ocr : {len(blocks_raw)} blocs après ensemble")
+        else:
+            blocks_raw = blocks_primary
+    else:
+        blocks_raw = blocks_primary
+
+    blocks = layout_analysis(blocks_raw)
+
+    # Déduplication IoU — supprime les blocs qui se chevauchent significativement
+    # (DBNet peut détecter la même région à plusieurs échelles).
+    blocks = _dedup_by_iou(blocks, iou_thresh=0.25)
+
+    n_before = len(blocks)
+    blocks = [b for b in blocks if not _is_garbage_block(b)]
+    n_rejected = n_before - len(blocks)
+    if n_rejected:
+        dbg(f"garbage_filter : {n_before} → {len(blocks)} blocs ({n_rejected} rejetés)")
     dbg(f"run_ocr : {len(blocks)} blocs")
     json.dump(blocks, sys.stdout, ensure_ascii=False)
 
