@@ -716,8 +716,19 @@ def process_pdf(
             skip_low_conf = set()
             for _i, _b in enumerate(ocr_blocks):
                 _nsp = _b["text"].replace(' ', '')
-                if (len(_nsp) <= _LEN_MAX_SHORT and
-                        _b.get("confidence", 1.0) < _CONF_MIN_SHORT):
+                _conf = _b.get("confidence", 1.0)
+                # Texte CJK pur (pas de chiffres, pas d'ASCII) : seuil plus bas
+                # car le modèle japan reconnaît bien le japonais isolé, même à
+                # faible confiance (blocs issus de séparation de tableau).
+                _is_pure_cjk = bool(_nsp) and all(
+                    0x3040 <= ord(c) <= 0x30FF or
+                    0xFF65 <= ord(c) <= 0xFF9F or
+                    0x4E00 <= ord(c) <= 0x9FFF or
+                    c in '。！？、'
+                    for c in _nsp
+                )
+                _threshold = 0.55 if _is_pure_cjk else _CONF_MIN_SHORT
+                if len(_nsp) <= _LEN_MAX_SHORT and _conf < _threshold:
                     skip_low_conf.add(_i)
 
             if texts and effective_src != tgt_lang:

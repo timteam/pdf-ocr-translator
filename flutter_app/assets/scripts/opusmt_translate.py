@@ -185,6 +185,30 @@ def _is_product_code_text(text: str) -> bool:
     return digits / len(nsp) > 0.40 and cjk <= 2
 
 
+_SPEC_LABEL_RE = re.compile(
+    r'^([぀-鿿]{2,}(?:[・\s][぀-鿿]+)*)'  # label japonais
+    r'[：:]\s*([\d\s\-–~〜,./]+)[。]?\s*$'                  # valeur numérique
+)
+
+
+def _extract_spec_label(text: str) -> tuple:
+    """Extrait (label, valeur) d'une entrée de tableau de spec type '後進:16。'.
+
+    Si le texte correspond au pattern japonais + ':' + chiffres,
+    retourne (label_japonais, ':valeur') pour permettre de traduire
+    uniquement la partie japonaise et de reconstituer la spec.
+    Retourne (None, None) si le pattern ne correspond pas.
+    """
+    m = _SPEC_LABEL_RE.match(text.strip())
+    if not m:
+        return None, None
+    label = m.group(1).strip()
+    value = m.group(2).strip()
+    if not _has_japanese(label):
+        return None, None
+    return label, f': {value}'
+
+
 def _has_japanese(text: str) -> bool:
     """Retourne True si le texte contient du japonais/CJK traduisible par le modèle ja→en."""
     for ch in text:
@@ -305,7 +329,9 @@ def main():
     # Le modèle ja→en produit <unk> sur du texte sans japonais → résultat "? ? ?".
     non_empty = [(i, t.strip()) for i, t in enumerate(texts) if t.strip()]
     # Passthrough : ASCII pur, pas de japonais, OU code produit mixte chiffres+CJK
+    # Pré-simplification : entrées de tableau spec 'Japanese:N' → traduit le label seul
     product_pass_indices = set()
+    spec_entries = {}   # orig_i → suffix à ré-appender après traduction
     to_translate_items = []
     passthrough = {}
     for i, t in non_empty:
@@ -315,7 +341,12 @@ def main():
             passthrough[i] = t
             product_pass_indices.add(i)
         else:
-            to_translate_items.append((i, t))
+            label, suffix = _extract_spec_label(t)
+            if label:
+                to_translate_items.append((i, label))
+                spec_entries[i] = suffix
+            else:
+                to_translate_items.append((i, t))
 
     n_pass = len(passthrough)
     n_prod = len(product_pass_indices)
@@ -372,6 +403,9 @@ def main():
             output[orig_i] = src
             n_fallback += 1
         else:
+            # Ré-appende le suffixe numérique si l'entrée était un spec tableau
+            if orig_i in spec_entries:
+                joined = joined.rstrip('.') + spec_entries[orig_i]
             output[orig_i] = joined
     if n_fallback:
         _log(f"PA3: {n_fallback} segment(s) remplacé(s) par le texte source "

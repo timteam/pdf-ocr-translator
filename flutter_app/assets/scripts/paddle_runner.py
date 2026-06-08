@@ -88,18 +88,9 @@ def preprocess_for_rapidocr(image_path):
         laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         dbg(f"qualité image : contrast={contrast:.1f} laplacian={laplacian_var:.0f}")
 
-        # 1. Filtre bilatéral — adaptatif selon la complexité de l'image.
-        # Pages riches en diagrammes (laplacian élevé, fort contraste local) :
-        # filtre plus fort pour atténuer le bruit des illustrations.
-        # Pages de texte pur : filtre léger pour préserver la netteté.
-        if laplacian_var > 400 and contrast > 60:
-            # Page complexe (diagramme d'étiquettes, etc.)
-            bil_d, bil_sc, bil_ss = 7, 100, 100
-            dbg("filtre bilatéral adaptatif (fort) : pages complexe/diagramme")
-        else:
-            bil_d, bil_sc, bil_ss = 5, 80, 80
-        img = cv2.bilateralFilter(img, d=bil_d, sigmaColor=bil_sc, sigmaSpace=bil_ss)
-        dbg(f"filtre bilatéral appliqué (d={bil_d}, σc={bil_sc})")
+        # 1. Filtre bilatéral — débruite tout en préservant les contours de caractères
+        img = cv2.bilateralFilter(img, d=5, sigmaColor=80, sigmaSpace=80)
+        dbg("filtre bilatéral appliqué")
 
         # 2. CLAHE systématique sur canal L (LAB) avec tuiles fines (16×16)
         #    Améliore le contraste local même sur des images globalement bien exposées.
@@ -272,8 +263,13 @@ def _fix_katakana_confusion(text: str) -> str:
         if ch not in _KATA_KANJI:
             continue
         prev_kana = i > 0 and _KANA_RANGE(ord(chars[i - 1]))
-        next_kana = i < n - 1 and _KANA_RANGE(ord(chars[i + 1]))
-        if prev_kana and next_kana:
+        # next = kana OU lettre majuscule ASCII (ex: リンク了S → リンクフS)
+        nxt = chars[i + 1] if i < n - 1 else ''
+        next_kana_or_alpha = (
+            (nxt and _KANA_RANGE(ord(nxt))) or
+            ('A' <= nxt <= 'Z')
+        )
+        if prev_kana and next_kana_or_alpha:
             chars[i] = _KATA_KANJI[ch]
     return ''.join(chars)
 
@@ -315,6 +311,11 @@ def _normalize_block_text(text: str) -> str:
             en tête des blocs contenant des chiffres (références de page d'index).
     """
     text = unicodedata.normalize('NFKC', text)
+    # Correction de variantes CJK simplifiées OCR courantes :
+    # le modèle Opus-MT ja→en est entraîné sur du japonais standard et ne reconnaît pas
+    # certains idéogrammes simplifiés chinois parfois lus par le modèle OCR.
+    _CJK_VARIANT_FIX = {'别': '別', '説': '説', '発': '発'}
+    text = ''.join(_CJK_VARIANT_FIX.get(c, c) for c in text)
     text = _fix_katakana_confusion(text)
     text = _CJK_DASH_RE.sub('-', text)
     text = _normalize_product_code(text)
@@ -629,6 +630,50 @@ def layout_analysis(blocks, row_barriers=None):
         dbg(f"layout_analysis : {n_in} blocs → {n_out} après fusion spatiale")
 
     return merged
+
+
+def _split_wide_blocks_at_boundary(blocks: list) -> list:
+    """Divise les blocs larges qui contiennent plusieurs phrases/valeurs.
+
+    DBNet détecte parfois une ligne entière de tableau comme une seule grande
+    boîte, produisant des blocs comme "後一輪。 11001420-5段階) 1020-1340-5段í階)".
+    Ces blocs multi-éléments traduisent mal. On les divise aux frontières 。/）
+    si le bloc dépasse 600px de large ET contient au moins 2 segments.
+
+    Les coordonnées X de chaque sous-bloc sont estimées proportionnellement.
+    """
+    _WIDE_THRESHOLD = 600  # px — en dessous, pas de split
+    result = []
+    for b in blocks:
+        width = b['right'] - b['left']
+        text  = b['text']
+        if width < _WIDE_THRESHOLD:
+            result.append(b)
+            continue
+        # Découpe sur 。 suivi d'un espace ou en fin de chaîne
+        parts = [p.strip() for p in re.split(r'(?<=。)\s+', text) if p.strip()]
+        if len(parts) <= 1:
+            result.append(b)
+            continue
+        # Répartition proportionnelle des coordonnées X
+        total_chars = sum(len(p) for p in parts) or 1
+        x_cursor = float(b['left'])
+        total_width = float(b['right'] - b['left'])
+        for part in parts:
+            part_w = total_width * len(part) / total_chars
+            result.append({
+                'text':       part,
+                'confidence': b['confidence'],
+                'left':       round(x_cursor),
+                'top':        b['top'],
+                'right':      round(x_cursor + part_w),
+                'bottom':     b['bottom'],
+            })
+            x_cursor += part_w
+    n_splits = len(result) - len(blocks)
+    if n_splits:
+        dbg(f"split_wide : {n_splits} sous-blocs créés depuis {len(blocks)} blocs")
+    return result
 
 
 def detect_dominant_script(text):
@@ -993,6 +1038,10 @@ def run_ocr(image_path, bcp47_lang):
     n_rejected = n_before - len(blocks)
     if n_rejected:
         dbg(f"garbage_filter : {n_before} → {len(blocks)} blocs ({n_rejected} rejetés)")
+
+    # Split des blocs larges contenant plusieurs phrases/valeurs de tableau
+    blocks = _split_wide_blocks_at_boundary(blocks)
+
     dbg(f"run_ocr : {len(blocks)} blocs")
     json.dump(blocks, sys.stdout, ensure_ascii=False)
 
