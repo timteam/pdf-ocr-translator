@@ -219,6 +219,23 @@ if [[ -f "$HASH_FILE" ]]; then
   fi
 fi
 
+# ── Nettoyage des instances LXC orphelines ───────────────────────────────────
+# Une interruption de snapcraft laisse une instance STOPPED avec un état
+# corrompu → les runs suivants échouent ("device already exists" ou ETag mismatch).
+if command -v lxc &>/dev/null; then
+  _STALE=$(lxc --project snapcraft list --format csv 2>/dev/null \
+           | awk -F',' '{print $1}' \
+           | grep "^snapcraft-pdf-ocr-translator" || true)
+  if [[ -n "$_STALE" ]]; then
+    echo -e "${YELLOW}🧹 Instances LXC orphelines détectées — suppression...${NC}"
+    while IFS= read -r _inst; do
+      lxc --project snapcraft delete "$_inst" 2>/dev/null && \
+        echo -e "${GREEN}   ✓ $_inst supprimée${NC}" || \
+        echo -e "${YELLOW}   ⚠️  Impossible de supprimer $_inst${NC}"
+    done <<< "$_STALE"
+  fi
+fi
+
 SNAPCRAFT_OK=false
 
 if $CLEAN; then
