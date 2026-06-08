@@ -81,14 +81,25 @@ def preprocess_for_rapidocr(image_path):
         if img is None:
             return None
 
+        h_img, w_img = img.shape[:2]
+        dbg(f"image dims: {w_img}x{h_img}")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         contrast = float(gray.std())
         laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
         dbg(f"qualité image : contrast={contrast:.1f} laplacian={laplacian_var:.0f}")
 
-        # 1. Filtre bilatéral — débruite tout en préservant les contours de caractères
-        img = cv2.bilateralFilter(img, d=5, sigmaColor=80, sigmaSpace=80)
-        dbg("filtre bilatéral appliqué")
+        # 1. Filtre bilatéral — adaptatif selon la complexité de l'image.
+        # Pages riches en diagrammes (laplacian élevé, fort contraste local) :
+        # filtre plus fort pour atténuer le bruit des illustrations.
+        # Pages de texte pur : filtre léger pour préserver la netteté.
+        if laplacian_var > 400 and contrast > 60:
+            # Page complexe (diagramme d'étiquettes, etc.)
+            bil_d, bil_sc, bil_ss = 7, 100, 100
+            dbg("filtre bilatéral adaptatif (fort) : pages complexe/diagramme")
+        else:
+            bil_d, bil_sc, bil_ss = 5, 80, 80
+        img = cv2.bilateralFilter(img, d=bil_d, sigmaColor=bil_sc, sigmaSpace=bil_ss)
+        dbg(f"filtre bilatéral appliqué (d={bil_d}, σc={bil_sc})")
 
         # 2. CLAHE systématique sur canal L (LAB) avec tuiles fines (16×16)
         #    Améliore le contraste local même sur des images globalement bien exposées.
@@ -232,6 +243,41 @@ def result_to_text(result, min_conf=0.4):
     return " ".join(parts)
 
 
+# Kanji visuellement similaires à des katakana — source fréquente d'erreur OCR.
+# La substitution ne s'applique que si le caractère est encadré par des kana
+# (hiragana ou katakana), évitant les faux-positifs dans du texte kanji pur.
+# Exemples : トラク夕→トラクタ (tracteur), エンシン→エンジン ne rentre pas ici
+_KATA_KANJI = {
+    '夕': 'タ',  # 夕→タ (soir → TA)
+    '工': 'エ',  # 工→エ (travail → E)
+    '口': 'ロ',  # 口→ロ (bouche → RO)
+    '力': 'カ',  # 力→カ (force → KA)
+    '八': 'ハ',  # 八→ハ (huit → HA)
+    '二': 'ニ',  # 二→ニ (deux → NI)
+    '一': 'ー',  # 一→ー (un → prolongateur)
+}
+_KANA_RANGE = lambda cp: 0x3040 <= cp <= 0x30FF  # hiragana + katakana
+
+
+def _fix_katakana_confusion(text: str) -> str:
+    """Corrige les confusions kanji↔katakana en contexte kana.
+
+    Ne substitue que si le caractère ambigu est entouré de kana des deux côtés.
+    """
+    if not any(ch in text for ch in _KATA_KANJI):
+        return text
+    chars = list(text)
+    n = len(chars)
+    for i, ch in enumerate(chars):
+        if ch not in _KATA_KANJI:
+            continue
+        prev_kana = i > 0 and _KANA_RANGE(ord(chars[i - 1]))
+        next_kana = i < n - 1 and _KANA_RANGE(ord(chars[i + 1]))
+        if prev_kana and next_kana:
+            chars[i] = _KATA_KANJI[ch]
+    return ''.join(chars)
+
+
 # Traits Unicode souvent lus à la place d'un tiret dans les codes produit Iseki
 # (ex : "1668一904-007-1" → "1668-904-007-1")
 _CJK_DASH_RE = re.compile(
@@ -269,8 +315,15 @@ def _normalize_block_text(text: str) -> str:
             en tête des blocs contenant des chiffres (références de page d'index).
     """
     text = unicodedata.normalize('NFKC', text)
+    text = _fix_katakana_confusion(text)
     text = _CJK_DASH_RE.sub('-', text)
     text = _normalize_product_code(text)
+    # Supprime les guillemets/crochets CJK et backticks isolés en tête ou en fin
+    # de bloc — artefacts OCR courants sur les pages avec diagrammes d'étiquettes.
+    # Exemples : "1ON」`スイッチを押して" → "1ONスイッチを押して"
+    text = re.sub(r'^[「」｢｣`\'"]+', '', text)
+    text = re.sub(r'[「」｢｣`\'"]+$', '', text)
+    text = text.strip()
     # PA6 : ・ (U+30FB), · (U+00B7), ‧ (U+2027), ⋅ (U+22C5) en tête d'une
     # référence de page → artefacts OCR des points de conduite (……)
     if re.search(r'\d', text):
@@ -331,8 +384,56 @@ def result_to_blocks(result, min_conf=0.55):
 #      (utile pour le texte vertical japonais fragmenté).
 # =============================================================================
 
+def _detect_table_row_barriers(img) -> list:
+    """Détecte les positions Y des lignes horizontales de tableau.
+
+    Utilise l'érosion morphologique pour trouver les traits continus qui s'étendent
+    sur au moins 30% de la largeur de l'image. Ces lignes servent de barrières
+    dans la passe de fusion horizontale pour éviter de mélanger du texte
+    provenant de lignes adjacentes d'un tableau.
+
+    Returns: liste triée des coordonnées Y (pixels) des lignes détectées.
+    """
+    if not OPENCV_AVAILABLE or img is None:
+        return []
+    try:
+        arr = img if isinstance(img, np.ndarray) else None
+        if arr is None:
+            arr = cv2.imread(img)
+        if arr is None:
+            return []
+        gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        H, W = gray.shape
+        # Seuil adaptatif pour binarisation
+        _, binary = cv2.threshold(gray, 0, 255,
+                                  cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # Noyau : 30% de la largeur × 1 px — détecte les lignes longues
+        min_len = max(30, W // 3)
+        kern = cv2.getStructuringElement(cv2.MORPH_RECT, (min_len, 1))
+        h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kern)
+        # Profil Y : ligne présente si ≥ 20% de la largeur est activée
+        h_proj = np.sum(h_lines > 0, axis=1)
+        barriers = []
+        in_line = False
+        line_start = 0
+        for y in range(H):
+            if h_proj[y] >= W * 0.20 and not in_line:
+                in_line, line_start = True, y
+            elif h_proj[y] < W * 0.20 and in_line:
+                in_line = False
+                barriers.append((line_start + y) // 2)
+        if in_line:
+            barriers.append((line_start + H) // 2)
+        dbg(f"tableau : {len(barriers)} ligne(s) H détectée(s) → barrières fusion")
+        return barriers
+    except Exception as e:
+        dbg(f"_detect_table_row_barriers : {e}")
+        return []
+
+
 def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None,
-                max_result_chars=None, max_result_height_px=None):
+                max_result_chars=None, max_result_height_px=None,
+                _row_barriers=None):
     """
     Fusionne les blocs proches sur un axe donné.
     axis='h' → même ligne (merge horizontal) ; axis='v' → même colonne (merge vertical).
@@ -414,6 +515,15 @@ def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None,
             if _is_product_code(b1['text']) or _is_product_code(b2['text']):
                 continue
 
+            # Barrières de tableau : si la fusion croise une ligne horizontale
+            # de tableau (row_barriers passé via closure), rejeter.
+            if axis == 'h' and _row_barriers:
+                b1_mid = (grp_pri_lo + grp_pri_hi) / 2
+                b2_mid = (primary_lo(b2) + primary_hi(b2)) / 2
+                y_lo, y_hi = min(b1_mid, b2_mid), max(b1_mid, b2_mid)
+                if any(y_lo < barrier < y_hi for barrier in _row_barriers):
+                    continue
+
             group.append(b2)
             used[j] = True
             # Étend les bornes du groupe pour le prochain candidat
@@ -458,9 +568,13 @@ def _is_index_page(blocks):
     return narrow / len(widths) > 0.45 and avg_w < 900
 
 
-def layout_analysis(blocks):
+def layout_analysis(blocks, row_barriers=None):
     """
     Applique les deux passes de fusion spatiale et filtre les boîtes trop petites.
+
+    row_barriers : liste triée de coordonnées Y de lignes de tableau.
+                   La passe horizontale ne fusionnera pas de blocs situés
+                   de part et d'autre d'une de ces lignes.
 
     Tuning :
       MIN_AREA      : 2000 px² → élimine fragments sub-caractère à 600 DPI
@@ -478,12 +592,15 @@ def layout_analysis(blocks):
 
     # Passe 1 : fusion horizontale (même ligne de texte)
     # PA1 : max 150 chars — évite les mega-blocs multi-colonnes
+    # Si row_barriers est fourni (tableau structuré), la fusion ne traverse pas
+    # les lignes horizontales du tableau → évite les fusions inter-lignes.
     merged = _merge_pass(filtered,
                          axis='h',
                          gap_max_ratio=1.5,
                          overlap_min_ratio=0.4,
                          max_gap_px=150,
-                         max_result_chars=150)
+                         max_result_chars=150,
+                         _row_barriers=row_barriers or [])
 
     # Passe 2 : fusion verticale (texte vertical japonais, listes)
     # PA1 : max 120 chars et 350 px de hauteur — bloque la fusion de paragraphes entiers
@@ -630,6 +747,14 @@ def _is_garbage_block(block: dict) -> bool:
     if re.search(r'[ãâ][»·\x80-\xBF]|ï¼|ï½', text):
         return True
 
+    # Caractère non-ASCII répété (ex: "金金", "ーー", "いいい")
+    # Un bloc de 2–5 chars tous identiques et non-ASCII est un artefact OCR
+    if len(set(non_space)) == 1 and 2 <= len(non_space) <= 5:
+        ch = non_space[0]
+        if ord(ch) > 127:
+            return True
+
+
     meaningful = 0
     has_japanese = False
     char_freq: dict[str, int] = {}
@@ -663,6 +788,11 @@ def _is_garbage_block(block: dict) -> bool:
     if (len(non_space) - meaningful) / len(non_space) > 0.4:
         return True
 
+    # Texte commençant par ッ/っ (petit tsu) : toujours un fragment en japonais
+    # Le petit tsu ne peut jamais être en position initiale dans un mot japonais
+    if non_space[0] in ('ッ', 'っ'):
+        return True
+
     # Non-japonais commençant par un symbole non alphanumérique
     if not has_japanese:
         first = non_space[0]
@@ -673,6 +803,12 @@ def _is_garbage_block(block: dict) -> bool:
     for ch, cnt in char_freq.items():
         if ch != '.' and cnt > 4 and cnt / len(non_space) > 0.5:
             return True
+
+    # Bloc court (≤5 chars) dominé par un CJK répété (ex: "金金轴" : 金×2/3=67%)
+    if 3 <= len(non_space) <= 5:
+        for ch, cnt in char_freq.items():
+            if cnt >= 2 and ord(ch) > 127 and cnt / len(non_space) > 0.60:
+                return True
 
     # Trop de mots mono-caractère
     words = text.split()
@@ -840,7 +976,13 @@ def run_ocr(image_path, bcp47_lang):
     else:
         blocks_raw = blocks_primary
 
-    blocks = layout_analysis(blocks_raw)
+    # Détecte les barrières de tableau (lignes H) pour éviter les fusions inter-lignes.
+    # Utilise le tableau numpy du preprocessing (qualité optimale) ou lit l'image source.
+    _img_for_barriers = (_preprocessed if isinstance(_preprocessed, np.ndarray)
+                         else None)
+    row_barriers = _detect_table_row_barriers(_img_for_barriers)
+
+    blocks = layout_analysis(blocks_raw, row_barriers=row_barriers)
 
     # Déduplication IoU — supprime les blocs qui se chevauchent significativement
     # (DBNet peut détecter la même région à plusieurs échelles).

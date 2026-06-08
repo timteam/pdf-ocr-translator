@@ -141,9 +141,48 @@ def _is_failed_translation(src: str, translated: str) -> bool:
         out_alpha = sum(1 for c in t if c.isalpha())
         if out_alpha / max(len(t), 1) > 0.5:
             return True
+    # Critère 5 : double '??' dans la sortie = deux tokens <unk> consécutifs
+    if '??' in t:
+        return True
+    # Critère 6 : '?' isolé entre espaces = token <unk> inséré en milieu de phrase
+    # (ex : "concomitant ? ation", "Programme ? :16")
+    if re.search(r'\s\?\s', t):
+        return True
+    # Critère 7 : sortie commence par '?' = traduction absente ou incomplète
+    if t.startswith('?'):
+        return True
+    # Critère 8 : sortie se termine par ' ?' ou '?' isolé final (trad incomplète)
+    # Exemple : "À ?" ou "réglage ?" — le modèle a produit un token incomplet à la fin
+    if re.search(r'\s\?\s*$', t):
+        return True
+    # Critère 9 : '?' immédiatement suivi d'une lettre = <unk> inséré dans un mot
+    # Exemple : "correctement ?d par J" → le modèle a tronqué un mot avec '?'
+    if re.search(r'\?[A-Za-zÀ-ÿ]', t):
+        return True
     return False
 
 
+
+
+def _is_product_code_text(text: str) -> bool:
+    """Détecte les codes produit mixtes chiffres+CJK — ne pas traduire.
+
+    Ex : "7-164日R" (日=CJK, ratio chiffres élevé) → passthrough.
+    Règle : ratio chiffres > 40 % ET ≤ 2 caractères CJK/japonais dans le texte.
+    Ces blocs vont au moteur ja→en qui traduit 日 par "jours", 号 par "n°", etc.,
+    produisant "7-164 jours R" au lieu de conserver "7-164日R" tel quel.
+    """
+    nsp = text.replace(' ', '')
+    if not nsp or len(nsp) < 3:
+        return False
+    digits = sum(1 for c in nsp if c.isdigit())
+    cjk    = sum(1 for c in nsp if (
+        0x3040 <= ord(c) <= 0x30FF or
+        0xFF65 <= ord(c) <= 0xFF9F or
+        0x4E00 <= ord(c) <= 0x9FFF or
+        0x3400 <= ord(c) <= 0x4DBF
+    ))
+    return digits / len(nsp) > 0.40 and cjk <= 2
 
 
 def _has_japanese(text: str) -> bool:
@@ -265,14 +304,25 @@ def main():
     # Passthrough : segments ASCII purs OU sans aucun caractère japonais/CJK.
     # Le modèle ja→en produit <unk> sur du texte sans japonais → résultat "? ? ?".
     non_empty = [(i, t.strip()) for i, t in enumerate(texts) if t.strip()]
-    to_translate_items = [(i, t) for i, t in non_empty
-                          if not all(ord(c) < 128 for c in t) and _has_japanese(t)]
-    passthrough = {i: t for i, t in non_empty
-                   if all(ord(c) < 128 for c in t) or not _has_japanese(t)}
+    # Passthrough : ASCII pur, pas de japonais, OU code produit mixte chiffres+CJK
+    product_pass_indices = set()
+    to_translate_items = []
+    passthrough = {}
+    for i, t in non_empty:
+        if all(ord(c) < 128 for c in t) or not _has_japanese(t):
+            passthrough[i] = t
+        elif _is_product_code_text(t):
+            passthrough[i] = t
+            product_pass_indices.add(i)
+        else:
+            to_translate_items.append((i, t))
 
     n_pass = len(passthrough)
-    if n_pass:
-        _log(f"{n_pass} segment(s) passthrough (ASCII ou sans contenu japonais)")
+    n_prod = len(product_pass_indices)
+    if n_prod:
+        _log(f"{n_prod} segment(s) passthrough code-produit (chiffres+CJK)")
+    if n_pass - n_prod:
+        _log(f"{n_pass - n_prod} segment(s) passthrough (ASCII ou sans contenu japonais)")
 
     # PA2 : expansion des blocs longs en sous-segments sur frontières de phrases
     expanded = []  # liste de (orig_i, sous_texte)
@@ -330,6 +380,9 @@ def main():
     for orig_i, t in passthrough.items():
         output[orig_i] = t
 
+    _log(f"[STATS] total={len(texts)} translate={len(to_translate_items)} "
+         f"passthrough={n_pass - n_prod} product_pass={n_prod} "
+         f"pa2_splits={n_extra} pa3_fallbacks={n_fallback}")
     _log(f"Terminé ({len(output)} résultats) — écriture stdout…")
     json.dump(output, sys.stdout, ensure_ascii=False)
     _log("OK")
