@@ -539,11 +539,24 @@ class OCRService {
         meaningful++;
       }
       if ((rune >= 0x3040 && rune <= 0x309F) ||   // hiragana
-          (rune >= 0x30A0 && rune <= 0x30FF) ||   // katakana
+          (rune >= 0x30A0 && rune <= 0x30FF) ||   // katakana (inclut ・ U+30FB)
           (rune >= 0xFF65 && rune <= 0xFF9F) ||   // katakana ½-largeur
           (rune >= 0x4E00 && rune <= 0x9FFF)) {   // CJK
         hasJapanese = true;
       }
+    }
+
+    // PA6 — "faux japonais" : uniquement ponctuations CJK (・ U+30FB, ー U+30FC…)
+    // sans hiragana, kanji ni katakana alphabétique → artefact leader de points d'index.
+    // Ces blocs ont hasJapanese=true mais ne contiennent pas de japonais réel.
+    if (hasJapanese) {
+      final hasRealJapanese = stripped.runes.any((r) =>
+          (r >= 0x3040 && r <= 0x30FA) ||  // hiragana + katakana alphabétique (hors ・)
+          (r >= 0x30FC && r <= 0x30FE) ||  // ー ヽ ヾ (prolongateur + itération)
+          (r >= 0xFF65 && r <= 0xFF9F) ||  // katakana ½-largeur
+          (r >= 0x4E00 && r <= 0x9FFF) ||  // CJK unifiés
+          (r >= 0x3400 && r <= 0x4DBF));   // CJK extension A
+      if (!hasRealJapanese) return true;
     }
 
     // Autorise les blocs de 2 caractères entièrement significatifs (ex: "軽油", "注意")
@@ -572,6 +585,20 @@ class OCRService {
     if (words.length >= 3) {
       final singleChar = words.where((w) => w.length == 1).length;
       if (singleChar / words.length > 0.6) return true;
+    }
+
+    // PA5 — Entropie de Shannon : texte Latin pur de longueur > 8 avec H < 2.5
+    // bits/char → garbage OCR (translittération répétitive, bruit de scanner).
+    // H(X) = -Σ p(c) · log₂ p(c). Un texte cohérent a H ≥ 3.0 bits/char.
+    if (!hasJapanese && nonSpace.length > 8 &&
+        RegExp(r'^[a-zA-Z]+$').hasMatch(nonSpace)) {
+      double entropy = 0.0;
+      final total = nonSpace.length.toDouble();
+      for (final entry in charFreq.entries) {
+        final p = entry.value / total;
+        if (p > 0) entropy -= p * log(p) / log(2);
+      }
+      if (entropy < 2.5) return true;
     }
 
     return false;

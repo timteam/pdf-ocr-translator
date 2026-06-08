@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:logger/logger.dart';
 import 'package:path/path.dart' as p;
@@ -21,7 +22,7 @@ class _DynamicFileOutput extends LogOutput {
     final lvl = event.level.name.toUpperCase().padRight(7);
     for (final line in event.lines) {
       try {
-        file.writeAsStringSync('[$ts][$lvl] $line\n', mode: FileMode.append);
+        file.writeAsStringSync('[$ts][$lvl] $line\n', mode: FileMode.append, encoding: utf8);
       } catch (_) {}
     }
   }
@@ -54,6 +55,7 @@ class AppLogger {
       '=== Traitement démarré ${DateTime.now().toIso8601String()} ===\n'
       'Sortie : $outputPath\n'
       'Log    : $logPath\n\n',
+      encoding: utf8,
     );
   }
 

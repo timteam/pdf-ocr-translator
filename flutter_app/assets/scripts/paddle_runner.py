@@ -81,6 +81,36 @@ def preprocess_for_rapidocr(image_path):
 
         modified = False
 
+        # PA8 : inversion des bandes sombres (texte clair sur fond sombre)
+        # Détecte les bandes horizontales dont la luminosité moyenne < 80
+        # (ex : bannière titre "イセキトラクタ" blanche sur fond noir).
+        row_means = np.mean(gray, axis=1)
+        dark_mask = row_means < 80
+        if np.any(dark_mask):
+            in_band, band_start = False, 0
+            n_rows = len(dark_mask)
+            bands = []
+            for ri in range(n_rows):
+                if dark_mask[ri] and not in_band:
+                    in_band, band_start = True, ri
+                elif not dark_mask[ri] and in_band:
+                    in_band = False
+                    if ri - band_start >= 15:
+                        bands.append((band_start, ri))
+            if in_band and n_rows - band_start >= 15:
+                bands.append((band_start, n_rows))
+            if bands:
+                img = img.copy()
+                for b_start, b_end in bands:
+                    img[b_start:b_end] = 255 - img[b_start:b_end]
+                    dbg(f"PA8: inversion bande sombre lignes {b_start}–{b_end} "
+                        f"({b_end - b_start}px)")
+                # Recalcule les métriques après inversion
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                contrast = float(gray.std())
+                laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                modified = True
+
         # CLAHE sur canal L (LAB) — préserve la couleur, améliore le contraste local
         if contrast < 45:
             lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
@@ -212,15 +242,43 @@ _CJK_DASH_RE = re.compile(
 )
 
 
+def _normalize_product_code(text: str) -> str:
+    """PA4 : normalise les codes produits alphanumériques.
+
+    Si ratio chiffres/longueur > 55 % et ≥ 2 groupes de 3 chiffres (schéma
+    XXXX-XXX-XXX-X), remplace tout séparateur non-alphanumérique entre deux
+    chiffres par un tiret. Généralise sans liste de caractères cibles fixe.
+    """
+    if not text or len(text) < 8:
+        return text
+    digits = sum(1 for c in text if c.isdigit())
+    if digits / len(text) <= 0.55:
+        return text
+    # Nécessite au moins deux groupes de ≥ 3 chiffres consécutifs (code produit)
+    if not re.search(r'\d{3}.\d{3}', text):
+        return text
+    text = re.sub(r'(?<=\d)[^0-9A-Za-z\s]{1,3}(?=\d)', '-', text)
+    text = re.sub(r'-{2,}', '-', text)
+    return text
+
+
 def _normalize_block_text(text: str) -> str:
-    """Nettoyage léger du texte OCR brut avant export.
+    """Nettoyage du texte OCR brut avant export.
 
     - NFKC : convertit fullwidth (ＡＢ→AB, １２→12), ligatures, etc.
-    - Remplace les caractères CJK/tirets Unicode glissés entre chiffres par '-'
-      (artefact fréquent dans les codes produit de type 1668-904-007-1).
+    - CJK dashes : remplace les traits CJK entre chiffres par '-'.
+    - PA4 : normalise les codes produits à fort ratio de chiffres.
+    - PA6 : supprime les artefacts de leaders de points (・・, ·, etc.)
+            en tête des blocs contenant des chiffres (références de page d'index).
     """
     text = unicodedata.normalize('NFKC', text)
     text = _CJK_DASH_RE.sub('-', text)
+    text = _normalize_product_code(text)
+    # PA6 : ・ (U+30FB), · (U+00B7), ‧ (U+2027), ⋅ (U+22C5) en tête d'une
+    # référence de page → artefacts OCR des points de conduite (……)
+    if re.search(r'\d', text):
+        text = re.sub(r'^[・·‧⋅`\'\":\-]+\s*', '', text)
+        text = text.strip()
     return text
 
 
@@ -261,11 +319,14 @@ def result_to_blocks(result, min_conf=0.5):
 #      (utile pour le texte vertical japonais fragmenté).
 # =============================================================================
 
-def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None):
+def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None,
+                max_result_chars=None, max_result_height_px=None):
     """
     Fusionne les blocs proches sur un axe donné.
     axis='h' → même ligne (merge horizontal) ; axis='v' → même colonne (merge vertical).
-    max_gap_px : limite absolue du gap en pixels (indépendante du ratio).
+    max_gap_px          : limite absolue du gap en pixels (indépendante du ratio).
+    max_result_chars    : PA1 — refuse la fusion si le bloc résultant dépasse N caractères.
+    max_result_height_px: PA1 — refuse la fusion verticale si la hauteur résultante > N px.
     Utilise les bornes courantes du groupe (chain merging) plutôt que le seul bloc ancre.
     """
     if not blocks:
@@ -323,6 +384,17 @@ def _merge_pass(blocks, axis, gap_max_ratio, overlap_min_ratio, max_gap_px=None)
                 continue
             if max_gap_px is not None and gap > max_gap_px:
                 continue
+
+            # PA1 : refuse la fusion si le bloc résultant serait trop grand
+            if max_result_chars is not None:
+                total_chars = sum(len(b['text']) for b in group) + len(b2['text'])
+                if total_chars > max_result_chars:
+                    continue
+            if max_result_height_px is not None:
+                new_hi = max(grp_pri_hi, primary_hi(b2))
+                new_lo = min(grp_pri_lo, primary_lo(b2))
+                if new_hi - new_lo > max_result_height_px:
+                    continue
 
             group.append(b2)
             used[j] = True
@@ -387,18 +459,23 @@ def layout_analysis(blocks):
                 if (b['right'] - b['left']) * (b['bottom'] - b['top']) >= MIN_AREA]
 
     # Passe 1 : fusion horizontale (même ligne de texte)
+    # PA1 : max 150 chars — évite les mega-blocs multi-colonnes
     merged = _merge_pass(filtered,
                          axis='h',
                          gap_max_ratio=1.5,
                          overlap_min_ratio=0.4,
-                         max_gap_px=150)
+                         max_gap_px=150,
+                         max_result_chars=150)
 
     # Passe 2 : fusion verticale (texte vertical japonais, listes)
+    # PA1 : max 120 chars et 350 px de hauteur — bloque la fusion de paragraphes entiers
     merged = _merge_pass(merged,
                          axis='v',
                          gap_max_ratio=1.0,
                          overlap_min_ratio=0.3,
-                         max_gap_px=80)
+                         max_gap_px=80,
+                         max_result_chars=120,
+                         max_result_height_px=350)
 
     # Passe 3 (page index) : fusion verticale complémentaire avec chevauchement strict
     # pour regrouper les entrées d'index fragmentées sur plusieurs lignes.

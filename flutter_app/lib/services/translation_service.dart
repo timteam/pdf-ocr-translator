@@ -85,6 +85,12 @@ class TranslationService {
     final src = await rootBundle.loadString('assets/scripts/opusmt_translate.py');
     await File(_scriptPath).writeAsString(src);
 
+    // PA7 : extrait le vocabulaire domaine dans le même répertoire que le script
+    try {
+      final vocabSrc = await rootBundle.loadString('assets/scripts/domain_vocab.json');
+      await File(p.join(appDir.path, 'domain_vocab.json')).writeAsString(vocabSrc);
+    } catch (_) {}
+
     await _loadCache();
     logger.i('TranslationService initialisé | Cache: ${_cache.length} entrées');
   }
