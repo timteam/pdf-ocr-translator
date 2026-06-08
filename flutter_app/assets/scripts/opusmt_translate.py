@@ -185,26 +185,29 @@ def _is_product_code_text(text: str) -> bool:
     return digits / len(nsp) > 0.40 and cjk <= 2
 
 
-_SPEC_LABEL_RE = re.compile(
-    r'^([぀-鿿]{2,}(?:[・\s][぀-鿿]+)*)'  # label japonais
-    r'[：:]\s*([\d\s\-–~〜,./]+)[。]?\s*$'                  # valeur numérique
-)
+_SPEC_VALUE_RE = re.compile(r'^[\d\s\-–~〜,./ ]+$')
 
 
 def _extract_spec_label(text: str) -> tuple:
     """Extrait (label, valeur) d'une entrée de tableau de spec type '後進:16。'.
 
-    Si le texte correspond au pattern japonais + ':' + chiffres,
-    retourne (label_japonais, ':valeur') pour permettre de traduire
-    uniquement la partie japonaise et de reconstituer la spec.
-    Retourne (None, None) si le pattern ne correspond pas.
+    Split simple sur ':' ou '：' — pas de regex à backtracking catastrophique.
+    Retourne (label_japonais, ': valeur') ou (None, None).
     """
-    m = _SPEC_LABEL_RE.match(text.strip())
-    if not m:
+    t = text.strip()
+    # Early exit : doit contenir ':' ou '：'
+    if ':' not in t and '：' not in t:
         return None, None
-    label = m.group(1).strip()
-    value = m.group(2).strip()
-    if not _has_japanese(label):
+    # Split sur le premier séparateur ':' ou '：'
+    sep_match = re.search(r'[：:]', t)
+    if not sep_match:
+        return None, None
+    idx = sep_match.start()
+    label = t[:idx].strip()
+    value = t[idx+1:].strip().rstrip('。').strip()
+    if len(label) < 2 or not _has_japanese(label):
+        return None, None
+    if not _SPEC_VALUE_RE.match(value) or not value:
         return None, None
     return label, f': {value}'
 
@@ -400,7 +403,9 @@ def main():
         src = orig_src_map[orig_i]
         # PA3 : quality gate — fallback sur le japonais si traduction ratée
         if _is_failed_translation(src, joined):
-            output[orig_i] = src
+            # Pour les entrées de tableau spec, revenir au TEXTE COMPLET original
+            # (pas juste le label extrait) — sinon on perd la valeur numérique.
+            output[orig_i] = texts[orig_i] if orig_i in spec_entries else src
             n_fallback += 1
         else:
             # Ré-appende le suffixe numérique si l'entrée était un spec tableau

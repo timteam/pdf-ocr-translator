@@ -246,6 +246,8 @@ _KATA_KANJI = {
     '八': 'ハ',  # 八→ハ (huit → HA)
     '二': 'ニ',  # 二→ニ (deux → NI)
     '一': 'ー',  # 一→ー (un → prolongateur)
+    '了': 'フ',  # 了→フ (achèvement → FU, ex: リンク了S→リンクフS)
+    '丁': 'テ',  # 丁→テ (bloc → TE, ex: デスク丁→デスクテ)
 }
 _KANA_RANGE = lambda cp: 0x3040 <= cp <= 0x30FF  # hiragana + katakana
 

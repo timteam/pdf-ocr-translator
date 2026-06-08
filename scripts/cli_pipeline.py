@@ -727,7 +727,9 @@ def process_pdf(
                     c in '。！？、'
                     for c in _nsp
                 )
-                _threshold = 0.55 if _is_pure_cjk else _CONF_MIN_SHORT
+                # Même seuil pour tout : la relaxation CJK causait des traductions
+                # parasites sur des blocs courts à faible confiance (ex: "回曲"→"Chansons")
+                _threshold = _CONF_MIN_SHORT
                 if len(_nsp) <= _LEN_MAX_SHORT and _conf < _threshold:
                     skip_low_conf.add(_i)
 
