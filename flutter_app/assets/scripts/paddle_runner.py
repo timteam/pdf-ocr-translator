@@ -252,6 +252,32 @@ _KATA_KANJI = {
 _KANA_RANGE = lambda cp: 0x3040 <= cp <= 0x30FF  # hiragana + katakana
 
 
+_SMALL_KATA_MAP = {'ァ': 'ア', 'ィ': 'イ', 'ゥ': 'ウ', 'ェ': 'エ', 'ォ': 'オ'}
+# Katakana qui peuvent légitimement être suivis d'une voyelle petite forme :
+# フ+ァィェォ (fa fi fe fo), ウ+ィェォ, テ/ト/ド+ィゥ, チ/ジ/シ/デ/ヴ+ェ, etc.
+_SMALL_KATA_VALID_PREV = frozenset('フウテトドチジシデヴ')
+
+
+def _normalize_small_katakana(text: str) -> str:
+    """Remplace les petites voyelles katakana illégitimes par leur grande forme.
+
+    En japonais, ァィゥェォ n'apparaissent qu'après certains katakana spécifiques
+    (フ, ウ, テ, ト…). Après d'autres katakana (カ, ラ, メ…), c'est une erreur OCR.
+    Exemple : "メカォート" → "メカオート" (ォ après カ = erreur OCR).
+    """
+    if not any(c in text for c in _SMALL_KATA_MAP):
+        return text
+    chars = list(text)
+    for i, c in enumerate(chars):
+        if c not in _SMALL_KATA_MAP:
+            continue
+        prev = chars[i - 1] if i > 0 else ''
+        # Ne remplace que si le précédent n'est pas un combinant valide
+        if prev not in _SMALL_KATA_VALID_PREV:
+            chars[i] = _SMALL_KATA_MAP[c]
+    return ''.join(chars)
+
+
 def _fix_katakana_confusion(text: str) -> str:
     """Corrige les confusions kanji↔katakana en contexte kana.
 
@@ -313,11 +339,27 @@ def _normalize_block_text(text: str) -> str:
             en tête des blocs contenant des chiffres (références de page d'index).
     """
     text = unicodedata.normalize('NFKC', text)
+    text = _normalize_small_katakana(text)
     # Correction de variantes CJK simplifiées OCR courantes :
     # le modèle Opus-MT ja→en est entraîné sur du japonais standard et ne reconnaît pas
     # certains idéogrammes simplifiés chinois parfois lus par le modèle OCR.
-    _CJK_VARIANT_FIX = {'别': '別', '説': '説', '発': '発'}
+    # 压→圧: variante chinoise simplifiée du kanji japonais 圧 (pression).
+    # Apparaît dans "油压" (huile hydraulique) → devrait être "油圧".
+    _CJK_VARIANT_FIX = {'别': '別', '説': '説', '発': '発',
+                         '压': '圧', '変': '変', '処': '処'}
     text = ''.join(_CJK_VARIANT_FIX.get(c, c) for c in text)
+    # Supprime les marqueurs de section OCR en tête de bloc.
+    # Les manuels japonais utilisent des caractères encadrés (囲み文字) pour numéroter
+    # les sections. L'OCR les lit parfois comme des kanji courants (幽, 慶, 國, 四, 圏…).
+    # On les supprime si le reste du texte est du japonais normal (≥ 3 kana/kanji).
+    _SECTION_MARKERS = frozenset({
+        '幽', '慶', '國', '四', '囲', '圏', '囿', '阯', '棟',
+        '郵', '阪', '嘉', '篇', '倖', '晨', '猛',
+    })
+    if text and text[0] in _SECTION_MARKERS:
+        rest = text[1:].lstrip()
+        if rest and sum(1 for c in rest[:6] if 0x3040 <= ord(c) <= 0x9FFF) >= 2:
+            text = rest
     text = _fix_katakana_confusion(text)
     text = _CJK_DASH_RE.sub('-', text)
     text = _normalize_product_code(text)
@@ -332,6 +374,26 @@ def _normalize_block_text(text: str) -> str:
     if re.search(r'\d', text):
         text = re.sub(r'^[・·‧⋅`\'\":\-]+\s*', '', text)
         text = text.strip()
+    # PA7 : supprime les hiragana parasites en fin de texte — artefacts OCR
+    # très courants dans les manuels Iseki. RÈGLES CONSERVATRICES pour éviter
+    # de supprimer du japonais légitime (ex: "これでいい。" = c'est OK).
+    #
+    # Cas 1 : す/い unique après katakana/chiffre/ASCII + 。 optionnel
+    #         (ex: "ウエイト60す" → "ウエイト60", "エレメントい。" → "エレメント。")
+    text = re.sub(r'(?<=[0-9A-Za-zァ-ンー])[すい](。?)$', r'\1', text)
+    #
+    # Cas 2 : い×2 après katakana (pas hiragana !) — OCR garbage après noms
+    #         (ex: "シートベルトいい" → "シートベルト")
+    #         Safe car いい après katakana = toujours artefact, jamais 「いい」 légit.
+    text = re.sub(r'(?<=[ァ-ンー])いい。?$', '', text)
+    #
+    # Cas 3 : い×3 ou plus universellement — toujours garbage
+    #         (ex: "取付ボルトいいい。" → "取付ボルト")
+    text = re.sub(r'い{3,}。?$', '', text)
+    #
+    # Cas 4 : す×2 ou plus universellement — toujours garbage
+    text = re.sub(r'す{2,}。?$', '', text)
+    text = text.strip()
     return text
 
 
@@ -996,17 +1058,29 @@ def run_ocr(image_path, bcp47_lang):
     # ── Ensemble sélectif : modèle ch sur la même image ──────────────────────
     # Activé uniquement si :
     #   1. Le modèle primaire n'est pas déjà ch.
-    #   2. La page contient suffisamment de blocs à faible confiance
-    #      (moyenne de confiance < 0.78 ou >15 % de blocs sous 0.70).
-    # → Skip sur les pages à fort texte japonais propre (économise ~15s).
+    #   2. La page contient suffisamment de blocs à faible confiance.
+    # Seuil adaptatif :
+    #   - Page à fort contenu numérique (>50% chiffres dans l'ensemble du texte) :
+    #     le japan model est moins pertinent pour les chiffres isolés → seuil plus haut
+    #     (avg_conf < 0.70 seulement). Évite 70+ secondes d'OCR inutile sur les
+    #     tableaux de vitesses/poids remplis de valeurs numériques.
+    #   - Page à contenu japonais normal : seuil standard (avg_conf < 0.78).
     if model_key != "ch":
         n_primary = len(blocks_primary)
         low_conf_count = sum(1 for b in blocks_primary if b['confidence'] < 0.70)
         avg_conf = (sum(b['confidence'] for b in blocks_primary) / n_primary
                     if n_primary else 1.0)
-        run_ensemble = (avg_conf < 0.78 or
+        # Ratio de chiffres dans l'ensemble du texte détecté
+        all_text = ''.join(b['text'] for b in blocks_primary)
+        digit_chars = sum(1 for c in all_text if c.isdigit())
+        total_chars = len(all_text.replace(' ', '')) or 1
+        digit_ratio = digit_chars / total_chars
+        # Seuil d'avg_conf moins agressif si page très numérique
+        avg_conf_threshold = 0.70 if digit_ratio > 0.50 else 0.78
+        run_ensemble = (avg_conf < avg_conf_threshold or
                         (n_primary > 0 and low_conf_count / n_primary > 0.15))
-        dbg(f"ensemble trigger : avg_conf={avg_conf:.2f}  "
+        dbg(f"ensemble trigger : avg_conf={avg_conf:.2f} "
+            f"(seuil={avg_conf_threshold:.2f}, digit_ratio={digit_ratio:.0%})  "
             f"low_conf={low_conf_count}/{n_primary}  run={run_ensemble}")
 
         if run_ensemble:
@@ -1033,7 +1107,15 @@ def run_ocr(image_path, bcp47_lang):
 
     # Déduplication IoU — supprime les blocs qui se chevauchent significativement
     # (DBNet peut détecter la même région à plusieurs échelles).
-    blocks = _dedup_by_iou(blocks, iou_thresh=0.25)
+    # Seuil adaptatif : pages très numériques (tableaux de vitesses, listes de pièces)
+    # produisent plus de détections multiples sur les mêmes cellules → seuil plus bas.
+    _all_text_dedup = ''.join(b.get('text', '') for b in blocks)
+    _digit_ratio_dedup = (sum(1 for c in _all_text_dedup if c.isdigit()) /
+                          max(len(_all_text_dedup.replace(' ', '')), 1))
+    _dedup_thresh = 0.18 if _digit_ratio_dedup > 0.45 else 0.25
+    blocks = _dedup_by_iou(blocks, iou_thresh=_dedup_thresh)
+    if _dedup_thresh != 0.25:
+        dbg(f"dedup adaptatif : digit_ratio={_digit_ratio_dedup:.0%} → seuil={_dedup_thresh}")
 
     n_before = len(blocks)
     blocks = [b for b in blocks if not _is_garbage_block(b)]
