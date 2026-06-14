@@ -86,20 +86,43 @@ def preprocess_for_rapidocr(image_path):
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         contrast = float(gray.std())
         laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        dbg(f"qualité image : contrast={contrast:.1f} laplacian={laplacian_var:.0f}")
+        mean_val = float(gray.mean())
+        dbg(f"qualité image : contrast={contrast:.1f} laplacian={laplacian_var:.0f} mean={mean_val:.1f}")
 
-        # 1. Filtre bilatéral — débruite tout en préservant les contours de caractères
-        img = cv2.bilateralFilter(img, d=5, sigmaColor=80, sigmaSpace=80)
-        dbg("filtre bilatéral appliqué")
+        # 0. INVERSION GLOBALE si image trop claire (texte clair sur fond sombre)
+        #    Seuil : mean > 200 sur toute l'image → inverser
+        if mean_val > 200:
+            img = 255 - img
+            dbg(f"INVERSION GLOBALE appliquée (mean={mean_val:.1f} > 200)")
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            mean_val = float(gray.mean())
+            # Recalculer contraste et laplacien après inversion
+            contrast = float(gray.std())
+            laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            dbg(f"après inversion : contrast={contrast:.1f} laplacian={laplacian_var:.0f}")
 
-        # 2. CLAHE systématique sur canal L (LAB) avec tuiles fines (16×16)
-        #    Améliore le contraste local même sur des images globalement bien exposées.
-        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l_ch, a_ch, b_ch = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
-        img = cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]),
-                           cv2.COLOR_LAB2BGR)
-        dbg("CLAHE(16×16, clip=3) appliqué")
+        # 1. CLAHE SÉLECTIF sur canal L (LAB) - désactivé si contraste déjà bon
+        #    Utiliser des paramètres conservateurs pour éviter les artefacts
+        #    Seuil : CLAHE uniquement si contrast < 80 (évite l'amplification du bruit)
+        if contrast < 80:
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            l_ch, a_ch, b_ch = cv2.split(lab)
+            # clipLimit modéré (3.0) + tiles plus grandes (32x32) pour moins dartefacts
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(32, 32))
+            img = cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]),
+                               cv2.COLOR_LAB2BGR)
+            dbg(f"CLAHE(32×32, clip=3.0) appliqué (contrast={contrast:.1f} < 80)")
+        else:
+            dbg(f"CLAHE ignoré (contrast={contrast:.1f} ≥ 80)")
+
+        # 2. Filtre bilatéral LÉGER - désactivé pour éviter le flou sur petits caractères
+        #    Pour les scans, le bilatéral peut flouter les petits textes
+        #    On l'applique seulement si l'image est très bruitée (laplacian > 1000)
+        if laplacian_var > 1000:
+            img = cv2.bilateralFilter(img, d=3, sigmaColor=50, sigmaSpace=50)
+            dbg("filtre bilatéral léger appliqué (laplacian élevé)")
+        else:
+            dbg("filtre bilatéral ignoré (laplacian ≤ 1000)")
 
         # 3. Unsharp masking — renforce les bords pour DBNet
         if laplacian_var < 300:
@@ -148,6 +171,9 @@ else:
 dbg(f"MODELS_DIR={MODELS_DIR}")
 
 # ── Correspondance BCP-47 → clé de modèle ─────────────────────────────────────
+# NOTE: Pour les documents scannés en japonais, le modèle "ch" (PP-OCRv4) donne
+# de meilleurs résultats de détection que "japan" (PP-OCRv1). Le modèle "japan"
+# est réservé pour les documents avec du texte japonais clair et bien défini.
 LANG_TO_MODEL = {
     "en": "ch",
     "fr": "ch",
@@ -158,7 +184,7 @@ LANG_TO_MODEL = {
     "nl": "ch",
     "pl": "ch",
     "vi": "ch",
-    "ja": "japan",
+    "ja": "ch",  # MODIFIÉ: utilise ch au lieu de japan pour meilleure détection
     "zh": "ch",
     "ko": "korean",
     "ru": "cyrillic",

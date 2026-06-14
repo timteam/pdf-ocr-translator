@@ -127,3 +127,10 @@ wheels/.hash
 # Cache packages de conversion (ctranslate2, torch, transformers)
 # Évite de re-télécharger ~500 MB à chaque build
 .ct2_cache/
+cli_output/Notice_Iseki_TK_29_3p/page_2_translated.json
+cli_output/Notice_Iseki_TK_29_3p/page_1_ocr.json
+cli_output/Notice_Iseki_TK_29_3p/page_1_report.txt
+cli_output/Notice_Iseki_TK_29_3p/page_1_translated.json
+cli_output/Notice_Iseki_TK_29_3p/page_2_ocr.json
+cli_output/Notice_Iseki_TK_29_3p/page_2_report.txt
+cli_output/Notice_Iseki_TK_29_3p/summary.txt

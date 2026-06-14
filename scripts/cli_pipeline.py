@@ -20,10 +20,10 @@ Options :
 Sorties par PDF :
   <out>/<pdf_stem>/page_N_ocr.json
   <out>/<pdf_stem>/page_N_translated.json
-  <out>/<pdf_stem>/page_N_report.txt      — rapport qualité détaillé
+  <out>/<pdf_stem>/page_N_report.txt      — rapport qualité détaillé + RAM
   <out>/<pdf_stem>/page_N_paddle.log
   <out>/<pdf_stem>/page_N_translate.log
-  <out>/<pdf_stem>/summary.txt
+  <out>/<pdf_stem>/summary.txt              — inclut RAM pic
 """
 
 import argparse
@@ -37,6 +37,33 @@ import tempfile
 import time
 from pathlib import Path
 
+# ─── Utilitaires RAM ─────────────────────────────────────────────────────────
+
+def get_memory_mb():
+    """Retourne la consommation RAM du processus courant (en MB)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024  # kB → MB
+    except (FileNotFoundError, PermissionError):
+        pass
+    return 0
+
+
+def measure_memory(func):
+    """Décorateur pour mesurer la RAM avant/après une fonction."""
+    def wrapper(*args, **kwargs):
+        mem_before = get_memory_mb()
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        elapsed = time.time() - start_time
+        mem_after = get_memory_mb()
+        mem_delta = mem_after - mem_before
+        return result, {"memory_mb": mem_after, "memory_delta_mb": mem_delta, "time_s": elapsed}
+    return wrapper
+
+
 # ─── Auto-détection de l'environnement ────────────────────────────────────────
 
 REPO_ROOT    = Path(__file__).resolve().parent.parent
@@ -49,6 +76,14 @@ GNOME_SNAP   = Path("/snap/gnome-46-2404/current")
 PYTHON312    = GNOME_SNAP / "usr" / "bin" / "python3.12"
 PYENV        = SNAP_ROOT  / "pyenv"
 TRANS_MODELS = SNAP_ROOT  / "data" / "flutter_assets" / "assets" / "translation_models"
+
+
+def set_scripts_from_snap(snap_root):
+    """Met à jour SCRIPTS_SRC pour pointer vers le snap si nécessaire."""
+    global SCRIPTS_SRC, MODELS_SRC
+    if snap_root:
+        SCRIPTS_SRC = Path(snap_root) / "data" / "flutter_assets" / "assets" / "scripts"
+        MODELS_SRC = Path(snap_root) / "data" / "flutter_assets" / "assets" / "models"
 
 LIB_DIRS = [
     "numpy.libs", "opencv_python.libs", "ctranslate2.libs",
@@ -175,14 +210,50 @@ def detect_language(image_path, python_bin, env):
 def translate_blocks(texts, src, tgt, python_bin, env, models_dir, cache=None):
     if not texts or src == tgt:
         return list(texts), ""
+    
+    # Gestion des modèles manquants avec fallback
     model_dirs = required_model_dirs(src, tgt)
     if not model_dirs:
         return list(texts), ""
+    
+    # Vérifier les modèles disponibles et trouver des fallbacks
+    available_dirs = []
+    missing_dirs = []
     for d in model_dirs:
         model_bin = models_dir / d / "model" / "model.bin"
-        if not model_bin.exists():
-            raise FileNotFoundError(f"Modèle manquant : {model_bin}")
-    model_paths = [str(models_dir / d) for d in model_dirs]
+        if model_bin.exists():
+            available_dirs.append(d)
+        else:
+            missing_dirs.append(d)
+    
+    # Si des modèles manquent, essayer des fallbacks
+    if missing_dirs:
+        fallback_found = False
+        # Fallback pour ch→fr : essayer ja→en→fr ou ch→en→fr via en
+        if src == "ch" and tgt == "fr":
+            # Essayer ch→en puis en→fr
+            fallback_dirs = ["ch-en", "en-fr"]
+            fallback_available = all((models_dir / d / "model" / "model.bin").exists() for d in fallback_dirs)
+            if fallback_available:
+                available_dirs = fallback_dirs
+                fallback_found = True
+                dbg_msg = f"FALLBACK: ch-fr → ch-en + en-fr"
+            # Essayer ja→en puis en→fr (si ja disponible)
+            elif (models_dir / "ja-en" / "model" / "model.bin").exists() and (models_dir / "en-fr" / "model" / "model.bin").exists():
+                available_dirs = ["ja-en", "en-fr"]
+                fallback_found = True
+                dbg_msg = f"FALLBACK: ch-fr → ja-en + en-fr"
+        
+        # Si aucun fallback trouvé, utiliser seulement les modèles disponibles
+        if not fallback_found and available_dirs:
+            dbg_msg = f"Modèles manquants: {missing_dirs}, utilisation partielle: {available_dirs}"
+        elif not available_dirs:
+            # Aucun modèle disponible, retourner le texte source
+            return list(texts), f"AUCUN MODÈLE DISPONIBLE pour {src}→{tgt} ou fallbacks"
+    else:
+        dbg_msg = None
+    
+    model_paths = [str(models_dir / d) for d in available_dirs]
     script = SCRIPTS_SRC / "opusmt_translate.py"
 
     to_translate_indices = []
@@ -213,7 +284,156 @@ def translate_blocks(texts, src, tgt, python_bin, env, models_dir, cache=None):
         if cache is not None:
             cache[texts[idx]] = translated
 
-    return results, result.stderr
+    # Contrôle qualité des traductions
+    quality_log = result.stderr
+    if dbg_msg:
+        quality_log = f"{dbg_msg}\n{quality_log}" if quality_log else dbg_msg
+    
+    # Évaluer la qualité des traductions
+    unreliable_translations = 0
+    for i, (src, tgt) in enumerate(zip(texts_filtered, translated_all)):
+        if src.strip() and tgt.strip() and src != tgt:
+            q = assess_translation_quality(src, tgt, effective_src, tgt_lang)
+            if not q["is_reliable"]:
+                unreliable_translations += 1
+                quality_log += f"\n  [BLOK {i}] Avertissements: {', '.join(q['warnings'])}"
+    
+    if unreliable_translations > 0:
+        quality_log += f"\n  → {unreliable_translations} traduction(s) peu fiable(s) sur {len(texts_filtered)}"
+    
+    return results, quality_log
+
+
+# ─── Contrôle qualité des traductions ──────────────────────────────────────────
+
+# Phrases absurdes détectées (à éviter dans les traductions)
+ABSURD_PHRASES_FR = [
+    "savoirs traditionnels",
+    "arrêt du tribunal", 
+    "cartographes",
+    "jiggers",
+    "taille doit avoir",
+    "montage de taill",
+    "le prochain doit",
+    "protection et dégradation",
+    "sismique",
+    "embouts, préchargement",
+    "route en marche",
+    "vitesse, en arrière",
+]
+
+# Mots suspects (souvent signes de mauvaise traduction)
+SUSPICIOUS_WORDS_FR = [
+    "savoirs", "traditionnels", "tribunal", "cartographes", "jiggers",
+    "taill", "sismique", "embouts", "préchar", "prochain doit",
+]
+
+
+def assess_translation_quality(src_text, tgt_text, src_lang, tgt_lang) -> dict:
+    """Évalue la qualité d'une traduction et détecte les anomalies."""
+    quality = {
+        "score": 1.0,
+        "warnings": [],
+        "is_reliable": True,
+        "details": {}
+    }
+    
+    # 1. Vérifications basiques
+    if not src_text.strip() or not tgt_text.strip():
+        quality["is_reliable"] = False
+        quality["warnings"].append("texte vide")
+        quality["score"] = 0.0
+        return quality
+    
+    src_clean = src_text.replace(" ", "").strip()
+    tgt_clean = tgt_text.replace(" ", "").strip()
+    
+    if len(src_clean) == 0 or len(tgt_clean) == 0:
+        quality["is_reliable"] = False
+        quality["warnings"].append("texte vide après nettoyage")
+        quality["score"] = 0.0
+        return quality
+    
+    # 2. Ratio de longueur
+    length_ratio = len(tgt_clean) / len(src_clean)
+    quality["details"]["length_ratio"] = round(length_ratio, 2)
+    
+    if length_ratio > 5.0:
+        quality["warnings"].append(f"ratio trop long ({length_ratio:.1f}×)")
+        quality["score"] *= 0.1  # Très mauvais
+        quality["is_reliable"] = False
+    elif length_ratio > 3.5:
+        quality["warnings"].append(f"ratio long ({length_ratio:.1f}×)")
+        quality["score"] *= 0.4
+        quality["is_reliable"] = False
+    elif length_ratio > 2.5:
+        quality["warnings"].append(f"ratio modérément long ({length_ratio:.1f}×)")
+        quality["score"] *= 0.7
+    elif length_ratio < 0.3:
+        quality["warnings"].append(f"ratio trop court ({length_ratio:.1f}×)")
+        quality["score"] *= 0.2
+        quality["is_reliable"] = False
+    
+    # 3. Traduction identique (pas de traduction)
+    if src_clean == tgt_clean:
+        quality["warnings"].append("identique à la source")
+        quality["score"] *= 0.3
+        quality["is_reliable"] = False
+    
+    # 4. Caractères CJK résiduels (pour traduction CJK→Latin)
+    if src_lang in ("ja", "zh", "ko", "ar", "hi", "th") and tgt_lang in ("fr", "en", "es", "de", "it", "pt", "nl", "pl"):
+        # Compter les caractères non-latins dans la traduction
+        cjk_chars = sum(1 for c in tgt_text if (
+            0x3040 <= ord(c) <= 0x30FF or   # Hiragana
+            0x30A0 <= ord(c) <= 0x30FF or   # Katakana
+            0x4E00 <= ord(c) <= 0x9FFF or   # CJK Unified Ideographs
+            0xFF00 <= ord(c) <= 0xFFEF or   # Halfwidth forms
+            0x0400 <= ord(c) <= 0x04FF or   # Cyrillic
+            0x0600 <= ord(c) <= 0x06FF or   # Arabic
+            0x0E00 <= ord(c) <= 0x0E7F     # Thai
+        ))
+        if cjk_chars > 0:
+            pct_cjk = (cjk_chars / len(tgt_text)) * 100
+            quality["warnings"].append(f"contient {cjk_chars} caractères non-latins ({pct_cjk:.0f}%)")
+            quality["score"] *= 0.1
+            quality["is_reliable"] = False
+            quality["details"]["residual_non_latin"] = cjk_chars
+    
+    # 5. Phrases absurdes
+    tgt_lower = tgt_text.lower()
+    for phrase in ABSURD_PHRASES_FR:
+        if phrase in tgt_lower:
+            quality["warnings"].append(f"traduction absurde: '{phrase}'")
+            quality["score"] *= 0.05
+            quality["is_reliable"] = False
+    
+    # 6. Mots suspects
+    suspicious_count = sum(1 for word in SUSPICIOUS_WORDS_FR if word in tgt_lower)
+    if suspicious_count > 1:
+        quality["warnings"].append(f"mots suspects: {suspicious_count}")
+        quality["score"] *= (0.5 ** suspicious_count)
+        quality["is_reliable"] = False
+    
+    # 7. Ponctuation anormale
+    # Compter les ponctuations consécutives (signe de mauvaise traduction)
+    import re
+    consecutive_punct = len(re.findall(r'[.!?]{3,}', tgt_text))
+    if consecutive_punct > 0:
+        quality["warnings"].append(f"ponctuation consécutive: {consecutive_punct} occurrence(s)")
+        quality["score"] *= 0.3
+        quality["is_reliable"] = False
+    
+    # 8. Chiffres isolés ou séquences suspectes
+    # Détecter les séquences de chiffres qui semblent être des artefacts
+    number_sequences = re.findall(r'\d{4,}', tgt_text)
+    if len(number_sequences) > 2:
+        quality["warnings"].append(f"séquences numériques: {number_sequences}")
+        quality["score"] *= 0.5
+    
+    # Arrondir le score
+    quality["score"] = round(min(quality["score"], 1.0), 2)
+    
+    return quality
 
 
 # ─── Métriques qualité ────────────────────────────────────────────────────────
@@ -462,10 +682,14 @@ def write_page_report(
     render_t  = timings.get('render', 0)
     ocr_t     = timings.get('ocr', 0)
     trad_t    = timings.get('translate', 0)
+    render_ram  = timings.get('render_ram_mb', 0)
+    ocr_ram     = timings.get('ocr_ram_mb', 0)
+    trad_ram    = timings.get('translate_ram_mb', 0)
 
     lines = [
         f"=== Page {page} | {lang_src} → {lang_tgt} | type={page_type} ===",
         f"Temps      : Rendu={render_t:.1f}s  OCR={ocr_t:.1f}s  Trad={trad_t:.1f}s",
+        f"RAM        : Rendu={render_ram}MB  OCR={ocr_ram}MB  Trad={trad_ram}MB",
         "",
     ]
 
@@ -561,6 +785,24 @@ def write_page_report(
                              f"  «{o['text_i']}» ↔ «{o['text_j']}»")
         lines.append("")
 
+    # ── Contrôle qualité des traductions (par bloc) ────────────────────────────
+    translation_qualities = []
+    unreliable_count = 0
+    for i, (blk, trad) in enumerate(zip(ocr_blocks, translations)):
+        orig = blk.get("text", "")
+        if orig.strip() and trad.strip() and orig != trad:
+            quality = assess_translation_quality(orig, trad, lang_src, lang_tgt)
+            translation_qualities.append((i, quality))
+            if not quality["is_reliable"]:
+                unreliable_count += 1
+    
+    if unreliable_count > 0:
+        lines.append(f"⚠ Traductions peu fiables : {unreliable_count}/{len(ocr_blocks)} blocs")
+        for idx, quality in translation_qualities:
+            if not quality["is_reliable"]:
+                lines.append(f"  Bloc {idx+1}: {', '.join(quality['warnings'])}")
+        lines.append("")
+    
     # ── Détail par bloc ───────────────────────────────────────────────────────
     for i, (blk, trad) in enumerate(zip(ocr_blocks, translations)):
         left   = blk.get("left",   0)
@@ -571,6 +813,15 @@ def write_page_report(
         orig   = blk.get("text", "")
         conf   = blk.get("confidence", 0.0)
         bar    = _conf_bar(conf)
+        
+        # Ajouter le score de qualité de traduction si disponible
+        quality_info = ""
+        for idx, q in translation_qualities:
+            if idx == i:
+                quality_info = f" [qualité={q['score']:.1f}]"
+                if not q["is_reliable"]:
+                    quality_info += " ⚠"
+                break
 
         # Char breakdown du bloc
         cb_blk = _char_breakdown(orig)
@@ -595,7 +846,7 @@ def write_page_report(
         conf_warn    = " !" if conf < 0.60 else ""
 
         bloc_header = (f"─── Bloc {i+1:02d} (conf={conf:.2f}{conf_warn}) [{bar}] {bb}"
-                       + (f" {cb_str}" if cb_str else ""))
+                       + (f" {cb_str}" if cb_str else "") + quality_info)
         lines += [
             bloc_header,
             f"  SRC : {orig}",
@@ -642,6 +893,11 @@ def process_pdf(
         "total_overlaps_moderate": 0,
         "errors": [],
         "timing_total": 0.0,
+        # Métriques RAM agrégées
+        "agg_ram_peak_mb": 0,
+        "agg_ram_render_mb": 0,
+        "agg_ram_ocr_mb": 0,
+        "agg_ram_translate_mb": 0,
         # Métriques qualité agrégées
         "agg_conf_n": 0,
         "agg_conf_sum": 0.0,
@@ -658,6 +914,7 @@ def process_pdf(
     }
     translation_cache = {} if use_cache else None
     t0_total = time.time()
+    mem_peak = get_memory_mb()
 
     for page in range(p_start, p_end + 1):
         print(f"\n  Page {page}/{p_end}")
@@ -668,6 +925,7 @@ def process_pdf(
 
             # ── Rendu ──────────────────────────────────────────────────────
             print(f"    Rendu {dpi} DPI…", end=" ", flush=True)
+            mem_before = get_memory_mb()
             t = time.time()
             try:
                 img_path = render_page(pdf_path, page, dpi, tmp_path)
@@ -676,7 +934,12 @@ def process_pdf(
                 stats["errors"].append(f"p{page} rendu: {exc}")
                 continue
             timings["render"] = time.time() - t
-            print(f"{timings['render']:.1f}s")
+            mem_after = get_memory_mb()
+            timings["render_ram_mb"] = mem_after
+            timings["render_ram_delta_mb"] = mem_after - mem_before
+            if mem_after > mem_peak:
+                mem_peak = mem_after
+            print(f"{timings['render']:.1f}s | RAM: {mem_after}MB (+{timings['render_ram_delta_mb']}MB)")
 
             # ── Détection langue ─────────────────────────────────────────
             effective_src = src_lang
@@ -687,6 +950,7 @@ def process_pdf(
 
             # ── OCR ─────────────────────────────────────────────────────
             print(f"    OCR ({effective_src})…", end=" ", flush=True)
+            mem_before = get_memory_mb()
             t = time.time()
             try:
                 ocr_blocks, paddle_log = ocr_page(img_path, effective_src, python_bin, env)
@@ -695,7 +959,12 @@ def process_pdf(
                 stats["errors"].append(f"p{page} ocr: {exc}")
                 continue
             timings["ocr"] = time.time() - t
-            print(f"{timings['ocr']:.1f}s → {len(ocr_blocks)} blocs")
+            mem_after = get_memory_mb()
+            timings["ocr_ram_mb"] = mem_after
+            timings["ocr_ram_delta_mb"] = mem_after - mem_before
+            if mem_after > mem_peak:
+                mem_peak = mem_after
+            print(f"{timings['ocr']:.1f}s → {len(ocr_blocks)} blocs | RAM: {mem_after}MB (+{timings['ocr_ram_delta_mb']}MB)")
 
             (out_dir / f"page_{page}_paddle.log").write_text(paddle_log, encoding="utf-8")
             (out_dir / f"page_{page}_ocr.json").write_text(
@@ -736,6 +1005,7 @@ def process_pdf(
             if texts and effective_src != tgt_lang:
                 print(f"    Traduction {effective_src}→{tgt_lang} ({len(texts)} seg)…",
                       end=" ", flush=True)
+                mem_before = get_memory_mb()
                 t = time.time()
                 try:
                     # Soumet uniquement les blocs non filtrés
@@ -758,7 +1028,12 @@ def process_pdf(
                     translate_log = str(exc)
                 else:
                     timings["translate"] = time.time() - t
-                    print(f"{timings['translate']:.1f}s")
+                    mem_after = get_memory_mb()
+                    timings["translate_ram_mb"] = mem_after
+                    timings["translate_ram_delta_mb"] = mem_after - mem_before
+                    if mem_after > mem_peak:
+                        mem_peak = mem_after
+                    print(f"{timings['translate']:.1f}s | RAM: {mem_after}MB (+{timings['translate_ram_delta_mb']}MB)")
 
                 (out_dir / f"page_{page}_translate.log").write_text(
                     translate_log, encoding="utf-8"
@@ -817,6 +1092,7 @@ def process_pdf(
                   f"{conf_info}{cjk_info}{overlap_warn}")
 
     stats["timing_total"] = time.time() - t0_total
+    stats["agg_ram_peak_mb"] = mem_peak
 
     # ── Résumé du document ──────────────────────────────────────────────────
     n = stats["agg_conf_n"] or 1
@@ -829,6 +1105,7 @@ def process_pdf(
         f"Pages traitées    : {stats['pages_processed']} / {p_end - p_start + 1}",
         f"Blocs totaux      : {stats['total_blocks']}",
         f"Durée totale      : {stats['timing_total']:.1f}s",
+        f"RAM pic           : {stats['agg_ram_peak_mb']} MB",
         "",
         "── MÉTRIQUES QUALITÉ OCR ────────────────────────────────────",
         f"Confiance globale : avg={avg_conf_global:.3f}",
@@ -892,6 +1169,9 @@ def main():
     python_bin = find_python312(args.snap)
     env        = build_python_env(snap_root)
     models_dir = get_translation_models_dir(snap_root)
+    
+    # Met à jour SCRIPTS_SRC si on utilise un snap
+    set_scripts_from_snap(args.snap)
 
     print(f"Python   : {python_bin}")
     print(f"Pyenv    : {snap_root / 'pyenv'}")
@@ -945,6 +1225,7 @@ def main():
     total_q_blk  = sum(s.get("agg_q_blocks", 0) for s in all_stats)
     total_pa3    = sum(s.get("agg_pa3_fallbacks", 0) for s in all_stats)
     total_garb   = sum(s.get("agg_garbage_rejected", 0) for s in all_stats)
+    total_ram_peak = max(s.get("agg_ram_peak_mb", 0) for s in all_stats)
     elapsed      = time.time() - t0
 
     print(f"\n{'='*60}")
@@ -952,6 +1233,7 @@ def main():
     print(f"  PDFs traités       : {len(all_stats)}")
     print(f"  Pages              : {total_pages}")
     print(f"  Blocs              : {total_blocks}")
+    print(f"  RAM pic            : {total_ram_peak} MB")
     print(f"  CJK→Latin traduits : {total_cjk_tr}")
     print(f"  Blocs '?'          : {total_q_blk}")
     print(f"  PA3 fallbacks      : {total_pa3}")
